@@ -149,8 +149,9 @@ export function captureCenterTargetSignature(
   const sy = vh * 0.5 - cropSize * 0.5;
 
   const tCanvas = getThumbCanvas();
-  const tCtx = tCanvas.getContext('2d');
+  const tCtx = tCanvas.getContext('2d', { willReadFrequently: true });
   let thumbnailDataUrl: string | undefined;
+  let ghostOutlineDataUrl: string | undefined;
   if (tCtx) {
     tCtx.clearRect(0, 0, 56, 56);
     if (mirrorX) {
@@ -163,10 +164,60 @@ export function captureCenterTargetSignature(
       tCtx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, 56, 56);
     }
     thumbnailDataUrl = tCanvas.toDataURL('image/jpeg', 0.62);
+
+    // Extract translucent Wall Ghost Edge Outline via lightweight Sobel gradient
+    try {
+      const srcImg = tCtx.getImageData(0, 0, 56, 56);
+      const sd = srcImg.data;
+      const gCanvas = document.createElement('canvas');
+      gCanvas.width = 56;
+      gCanvas.height = 56;
+      const gCtx = gCanvas.getContext('2d');
+      if (gCtx) {
+        const outImg = gCtx.createImageData(56, 56);
+        const od = outImg.data;
+        const luma = (x: number, y: number) => {
+          const i = (y * 56 + x) * 4;
+          return sd[i] * 0.299 + sd[i + 1] * 0.587 + sd[i + 2] * 0.114;
+        };
+        for (let y = 1; y < 55; y++) {
+          for (let x = 1; x < 55; x++) {
+            const gx =
+              -luma(x - 1, y - 1) -
+              2 * luma(x - 1, y) -
+              luma(x - 1, y + 1) +
+              luma(x + 1, y - 1) +
+              2 * luma(x + 1, y) +
+              luma(x + 1, y + 1);
+            const gy =
+              -luma(x - 1, y - 1) -
+              2 * luma(x, y - 1) -
+              luma(x + 1, y - 1) +
+              luma(x - 1, y + 1) +
+              2 * luma(x, y + 1) +
+              luma(x + 1, y + 1);
+            const mag = Math.sqrt(gx * gx + gy * gy);
+            const idx = (y * 56 + x) * 4;
+            if (mag > 68) {
+              const alpha = Math.min(220, Math.round((mag - 68) * 1.45));
+              od[idx] = 245;
+              od[idx + 1] = 205;
+              od[idx + 2] = 88;
+              od[idx + 3] = alpha;
+            }
+          }
+        }
+        gCtx.putImageData(outImg, 0, 0);
+        ghostOutlineDataUrl = gCanvas.toDataURL('image/png');
+      }
+    } catch {
+      // ignore if canvas pixel read unavailable
+    }
   }
 
   return {
     thumbnailDataUrl,
+    ghostOutlineDataUrl,
     gridRgb: sig.gridRgb,
     colorHist: sig.colorHist,
   };
@@ -223,4 +274,90 @@ export function matchVisualTargetAt(
   const patchSim = Math.max(0, 1 - diffSum / (48 * 140));
 
   return Math.max(0, Math.min(1, 0.56 * histSim + 0.44 * patchSim));
+}
+
+let ghostWorkCanvas: HTMLCanvasElement | null = null;
+
+/**
+ * Renders a subtle translucent golden-cyan Sobel edge outline of whatever wall/temple/object
+ * sits directly behind the center golden dot in Pin Mode (no boxes, pure organic wall contours).
+ */
+export function renderCenterGhostOutline(
+  video: HTMLVideoElement | null,
+  destCanvas: HTMLCanvasElement | null,
+  mirrorX = false
+): void {
+  if (!video || !destCanvas || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+    return;
+  }
+  const size = 64;
+  if (!ghostWorkCanvas) {
+    ghostWorkCanvas = document.createElement('canvas');
+    ghostWorkCanvas.width = size;
+    ghostWorkCanvas.height = size;
+  }
+  const wCtx = ghostWorkCanvas.getContext('2d', { willReadFrequently: true });
+  const dCtx = destCanvas.getContext('2d');
+  if (!wCtx || !dCtx) return;
+
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const crop = Math.max(40, Math.min(vw, vh) * 0.28);
+  const sx = vw * 0.5 - crop * 0.5;
+  const sy = vh * 0.5 - crop * 0.5;
+
+  wCtx.clearRect(0, 0, size, size);
+  if (mirrorX) {
+    wCtx.save();
+    wCtx.translate(size, 0);
+    wCtx.scale(-1, 1);
+    wCtx.drawImage(video, sx, sy, crop, crop, 0, 0, size, size);
+    wCtx.restore();
+  } else {
+    wCtx.drawImage(video, sx, sy, crop, crop, 0, 0, size, size);
+  }
+
+  const src = wCtx.getImageData(0, 0, size, size).data;
+  const out = dCtx.createImageData(size, size);
+  const od = out.data;
+
+  const luma = (x: number, y: number) => {
+    const idx = (y * size + x) * 4;
+    return src[idx] * 0.299 + src[idx + 1] * 0.587 + src[idx + 2] * 0.114;
+  };
+
+  const half = size * 0.5;
+  for (let y = 1; y < size - 1; y++) {
+    for (let x = 1; x < size - 1; x++) {
+      // Radial soft circular mask so edges fade organically with zero square corners
+      const distNorm = Math.hypot(x - half, y - half) / (half - 2);
+      if (distNorm >= 1) continue;
+      const radialFade = Math.max(0, 1 - distNorm * distNorm);
+
+      const gx =
+        -luma(x - 1, y - 1) -
+        2 * luma(x - 1, y) -
+        luma(x - 1, y + 1) +
+        luma(x + 1, y - 1) +
+        2 * luma(x + 1, y) +
+        luma(x + 1, y + 1);
+      const gy =
+        -luma(x - 1, y - 1) -
+        2 * luma(x, y - 1) -
+        luma(x + 1, y - 1) +
+        luma(x - 1, y + 1) +
+        2 * luma(x, y + 1) +
+        luma(x + 1, y + 1);
+      const mag = Math.sqrt(gx * gx + gy * gy);
+      if (mag > 64) {
+        const idx = (y * size + x) * 4;
+        const alpha = Math.min(200, Math.round((mag - 64) * 1.35 * radialFade));
+        od[idx] = 245;
+        od[idx + 1] = 204;
+        od[idx + 2] = 82;
+        od[idx + 3] = alpha;
+      }
+    }
+  }
+  dCtx.putImageData(out, 0, 0);
 }

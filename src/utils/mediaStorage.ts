@@ -5,6 +5,7 @@ export const INVITE_KEY = 'tsl_invites_v1';
 export const RECORD_KEY = 'tsl_world_record_v1';
 export const REPORTED_KEY = 'tsl_reported_v1';
 export const LANG_KEY = 'tsl_lang';
+export const HUNDRED_YEARS_MS = Math.round(100 * 365.25 * 24 * 3600 * 1000);
 
 const DB_NAME = 'tsl_media_db';
 const DB_STORE = 'blobs';
@@ -281,6 +282,9 @@ export function buildDefaultDemos(baseLat = DEFAULT_LAT, baseLng = DEFAULT_LNG):
       views: 4281,
       reactions: { heart: 912, blessing: 640, mindblown: 318 },
       createdAt: now - 3600000,
+      expiresAt: now + HUNDRED_YEARS_MS,
+      isVip: true,
+      hasGoldenAura: true,
     },
     {
       id: 'demo_private_2',
@@ -390,3 +394,139 @@ export function getInvitesCount(): number {
 export function getWorldRecordCount(): number {
   return parseInt(localStorage.getItem(RECORD_KEY) || '1482910', 10);
 }
+
+export async function exportAllStoriesBackup(stories: ARStory[]): Promise<string> {
+  const hydrated: ARStory[] = [];
+  for (const s of stories) {
+    let mediaData = s.mediaData;
+    if (!mediaData && s.mediaIdbKey) {
+      mediaData = await loadMediaBlob(s.mediaIdbKey);
+    }
+    let audioData = s.audioData;
+    if (!audioData && s.audioIdbKey) {
+      audioData = await loadMediaBlob(s.audioIdbKey);
+    }
+    const replies = s.replies
+      ? await Promise.all(
+          s.replies.map(async (r) => {
+            let rAudio = r.audioData || null;
+            if (!rAudio && r.audioIdbKey) {
+              rAudio = await loadMediaBlob(r.audioIdbKey);
+            }
+            return { ...r, audioData: rAudio };
+          })
+        )
+      : [];
+    hydrated.push({
+      ...s,
+      mediaData,
+      audioData,
+      replies,
+    });
+  }
+
+  return JSON.stringify(
+    {
+      app: 'THE SECRET LENS',
+      version: 3,
+      retention: '100 Years Forever',
+      exportedAt: new Date().toISOString(),
+      stories: hydrated,
+    },
+    null,
+    2
+  );
+}
+
+export async function importStoriesBackup(
+  jsonText: string,
+  currentStories: ARStory[]
+): Promise<{ stories: ARStory[]; added: number; updated: number }> {
+  const parsed = JSON.parse(jsonText) as { stories?: unknown } | ARStory[];
+  const rawList = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.stories)
+      ? (parsed.stories as ARStory[])
+      : null;
+
+  if (!rawList) {
+    throw new Error('Invalid THE SECRET LENS backup JSON format.');
+  }
+
+  const normalizedIncoming: ARStory[] = [];
+  for (const item of rawList) {
+    if (!item || typeof item.id !== 'string' || typeof item.lat !== 'number' || typeof item.lng !== 'number') {
+      continue;
+    }
+
+    let mediaData = item.mediaData ?? null;
+    let mediaIdbKey = item.mediaIdbKey ?? null;
+    if (mediaData && mediaData.length > 220000) {
+      const key = mediaIdbKey || `m_${item.id}`;
+      const ok = await saveMediaBlob(key, mediaData);
+      if (ok) {
+        mediaIdbKey = key;
+        mediaData = null;
+      }
+    }
+
+    let audioData = item.audioData ?? null;
+    let audioIdbKey = item.audioIdbKey ?? null;
+    if (audioData && audioData.length > 180000) {
+      const key = audioIdbKey || `a_${item.id}`;
+      const ok = await saveMediaBlob(key, audioData);
+      if (ok) {
+        audioIdbKey = key;
+        audioData = null;
+      }
+    }
+
+    const replies = Array.isArray(item.replies)
+      ? await Promise.all(
+          item.replies.map(async (r) => {
+            let rAudio = r.audioData ?? null;
+            let rKey = r.audioIdbKey ?? null;
+            if (rAudio && rAudio.length > 180000) {
+              const k = rKey || `ra_${r.id}`;
+              const ok = await saveMediaBlob(k, rAudio);
+              if (ok) {
+                rKey = k;
+                rAudio = null;
+              }
+            }
+            return { ...r, audioData: rAudio, audioIdbKey: rKey };
+          })
+        )
+      : [];
+
+    normalizedIncoming.push({
+      ...item,
+      mediaData,
+      mediaIdbKey,
+      audioData,
+      audioIdbKey,
+      replies,
+    });
+  }
+
+  const byId = new Map<string, ARStory>();
+  for (const existing of currentStories) {
+    byId.set(existing.id, existing);
+  }
+
+  let added = 0;
+  let updated = 0;
+  for (const inc of normalizedIncoming) {
+    if (byId.has(inc.id)) {
+      updated += 1;
+    } else {
+      added += 1;
+    }
+    byId.set(inc.id, inc);
+  }
+
+  const merged = Array.from(byId.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  persistStories(merged);
+  return { stories: merged, added, updated };
+}
+

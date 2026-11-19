@@ -2,11 +2,12 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { buildCosmicPlanetsAndThoughts, CosmicUniverseHandle } from './solarSystem';
 import { buildTunnelOfLightWormhole, WormholeHandle } from './wormhole';
-import { createMilkyWayDustTexture } from './proceduralTextures';
+import { createMilkyWayDustTexture, createNebulaCloudTexture } from './proceduralTextures';
 
 export interface SecretLensSceneState {
   cameraActive: boolean;
   cameraFacing?: 'environment' | 'user';
+  appMode?: 'home' | 'pin' | 'scan';
   isRecording?: boolean;
   targetYaw: number;
   targetPitch: number;
@@ -58,6 +59,18 @@ export class SecretLensScene {
   private milkyWayMat: THREE.MeshBasicMaterial;
   private milkyWayMesh: THREE.Mesh;
 
+  // Volumetric Glowing Cyan-and-Gold Nebula Clouds
+  private nebulaGroup: THREE.Group;
+  private nebulaGeo: THREE.PlaneGeometry;
+  private nebulaTextures: THREE.CanvasTexture[] = [];
+  private nebulaMaterials: THREE.MeshBasicMaterial[] = [];
+  private nebulaMeshes: THREE.Mesh[] = [];
+
+  // 3D Rotating Logarithmic Spiral Galaxy
+  private galaxyGeo: THREE.BufferGeometry;
+  private galaxyMat: THREE.ShaderMaterial;
+  private galaxyPoints: THREE.Points;
+
   private isSoftwareGl: boolean;
   private glContext: WebGL2RenderingContext | null = null;
   private rafId = 0;
@@ -74,6 +87,7 @@ export class SecretLensScene {
 
   private state: SecretLensSceneState = {
     cameraActive: false,
+    appMode: 'home',
     isRecording: false,
     targetYaw: 0,
     targetPitch: 0,
@@ -166,6 +180,125 @@ export class SecretLensScene {
     this.milkyWayMesh.position.set(0, 0.8, -36);
     this.milkyWayMesh.rotation.z = THREE.MathUtils.degToRad(-12);
     this.scene.add(this.milkyWayMesh);
+
+    // Volumetric Cyan-and-Gold Glowing Nebula Clouds drifting in deep cosmic space
+    this.nebulaGroup = new THREE.Group();
+    this.nebulaGeo = new THREE.PlaneGeometry(24, 24);
+    const nebulaConfigs = [
+      {
+        c1: 'rgba(56, 232, 255, 0.24)',
+        c2: 'rgba(245, 197, 66, 0.14)',
+        pos: new THREE.Vector3(-4.2, 2.2, -22),
+        scale: 1.35,
+      },
+      {
+        c1: 'rgba(245, 197, 66, 0.22)',
+        c2: 'rgba(56, 232, 255, 0.16)',
+        pos: new THREE.Vector3(4.6, -1.6, -25),
+        scale: 1.5,
+      },
+      {
+        c1: 'rgba(66, 148, 255, 0.20)',
+        c2: 'rgba(56, 232, 255, 0.16)',
+        pos: new THREE.Vector3(0.4, 1.4, -29),
+        scale: 1.85,
+      },
+    ];
+    for (const cfg of nebulaConfigs) {
+      const tex = createNebulaCloudTexture(cfg.c1, cfg.c2);
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex,
+        transparent: true,
+        opacity: 0.48,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const mesh = new THREE.Mesh(this.nebulaGeo, mat);
+      mesh.position.copy(cfg.pos);
+      mesh.scale.setScalar(cfg.scale);
+      this.nebulaTextures.push(tex);
+      this.nebulaMaterials.push(mat);
+      this.nebulaMeshes.push(mesh);
+      this.nebulaGroup.add(mesh);
+    }
+    this.scene.add(this.nebulaGroup);
+
+    // 3D Rotating Logarithmic Spiral Galaxy (golden core -> electric cyan outer arms)
+    const galaxyCount = this.isSoftwareGl ? 1800 : 4600;
+    const gPos = new Float32Array(galaxyCount * 3);
+    const gCol = new Float32Array(galaxyCount * 3);
+    const gSize = new Float32Array(galaxyCount);
+    const gCoreColor = new THREE.Color('#ffe594');
+    const gArmCyan = new THREE.Color('#47e5ff');
+    const gArmBlue = new THREE.Color('#3b6dff');
+    const spiralArms = 4;
+    const galaxyRadius = 11.5;
+
+    for (let i = 0; i < galaxyCount; i++) {
+      const i3 = i * 3;
+      const rNorm = Math.pow(Math.random(), 1.45);
+      const radius = rNorm * galaxyRadius;
+      const armAngle = ((i % spiralArms) / spiralArms) * Math.PI * 2;
+      const spinAngle = radius * 0.62;
+      const scatter = (1.0 - rNorm * 0.35) * 0.9;
+      const randX = (Math.random() + Math.random() - 1) * scatter;
+      const randY = (Math.random() + Math.random() - 1) * scatter * 0.24;
+      const randZ = (Math.random() + Math.random() - 1) * scatter;
+
+      gPos[i3] = Math.cos(armAngle + spinAngle) * radius + randX;
+      gPos[i3 + 1] = randY;
+      gPos[i3 + 2] = Math.sin(armAngle + spinAngle) * radius + randZ;
+
+      const mixed = gCoreColor.clone().lerp(i % 3 === 0 ? gArmBlue : gArmCyan, Math.min(1, rNorm * 1.15));
+      gCol[i3] = mixed.r;
+      gCol[i3 + 1] = mixed.g;
+      gCol[i3 + 2] = mixed.b;
+      gSize[i] = rNorm < 0.2 ? 3.2 + Math.random() * 2.2 : 1.5 + Math.random() * 2.2;
+    }
+
+    this.galaxyGeo = new THREE.BufferGeometry();
+    this.galaxyGeo.setAttribute('position', new THREE.BufferAttribute(gPos, 3));
+    this.galaxyGeo.setAttribute('aColor', new THREE.BufferAttribute(gCol, 3));
+    this.galaxyGeo.setAttribute('aSize', new THREE.BufferAttribute(gSize, 1));
+    this.galaxyMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uTime: { value: 0 },
+        uPixelRatio: { value: pixelRatio },
+        uAlpha: { value: 0.72 },
+      },
+      vertexShader: `
+        attribute vec3 aColor;
+        attribute float aSize;
+        uniform float uPixelRatio;
+        varying vec3 vColor;
+        void main() {
+          vColor = aColor;
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = clamp(aSize * uPixelRatio * (22.0 / max(10.0, -mvPosition.z)), 1.0, 10.0);
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform float uAlpha;
+        varying vec3 vColor;
+        void main() {
+          vec2 uv = gl_PointCoord - vec2(0.5);
+          float d = length(uv);
+          if (d > 0.5) discard;
+          float glow = exp(-d * d * 18.0);
+          gl_FragColor = vec4(vColor, glow * uAlpha);
+        }
+      `,
+    });
+    this.galaxyPoints = new THREE.Points(this.galaxyGeo, this.galaxyMat);
+    this.galaxyPoints.position.set(1.3, 1.1, -24);
+    this.galaxyPoints.rotation.x = THREE.MathUtils.degToRad(58);
+    this.galaxyPoints.rotation.z = THREE.MathUtils.degToRad(-24);
+    this.galaxyPoints.frustumCulled = false;
+    this.scene.add(this.galaxyPoints);
 
     // Thousands of Tiny, Sharp, Multi-Layered Twinkling Stars (1 GPU draw call)
     // Mixes distant pinpoint micro-stars, tilted Milky Way dense field & bright diffraction stars
@@ -366,32 +499,51 @@ export class SecretLensScene {
   public setState(partial: Partial<SecretLensSceneState>): void {
     const prevCam = this.state.cameraActive;
     const prevRec = Boolean(this.state.isRecording || this.state.cleanReelMode);
+    const prevMode = this.state.appMode || 'home';
     Object.assign(this.state, partial);
     const recording = Boolean(this.state.isRecording || this.state.cleanReelMode);
+    const mode = this.state.appMode || 'home';
 
-    if (prevCam !== this.state.cameraActive || prevRec !== recording) {
+    if (prevCam !== this.state.cameraActive || prevRec !== recording || prevMode !== mode) {
       this.applyBackgroundMode();
     }
 
-    // Unified Video & Reel Recording Mode: hide ALL planets, moons, rings & orbiting thoughts; reveal Tunnel of Light Wormhole
-    this.universe.planetsGroup.visible = !recording;
-    this.universe.orbitingThoughtsGroup.visible = !recording;
+    // Cosmic Home Dashboard shows drifting 3D Planets & Orbiting Thoughts;
+    // Pin Mode, Scan Mode, and Video/Reel Recording Mode hide all planets cleanly!
+    const showPlanets = mode === 'home' && !recording;
+    const showDeepSpace = mode !== 'pin' || !this.state.cameraActive || recording;
+    this.universe.planetsGroup.visible = showPlanets;
+    this.universe.orbitingThoughtsGroup.visible = showPlanets;
     this.wormhole.group.visible = recording;
+    this.galaxyPoints.visible = showDeepSpace;
+    this.nebulaGroup.visible = showDeepSpace;
+    this.milkyWayMesh.visible = showDeepSpace;
+    this.starPoints.visible = showDeepSpace;
+    this.dustPoints.visible = showDeepSpace;
   }
 
   private applyBackgroundMode(): void {
     const recording = Boolean(this.state.isRecording || this.state.cleanReelMode);
-    // Keep WebGL buffer alpha-transparent so either live <video> or deep black-blue cyberCanvas (#000105->#03091e) shines behind stars
+    const mode = this.state.appMode || 'home';
+    // Keep WebGL buffer alpha-transparent so either live <video> or deep black-blue cyberCanvas shines behind stars
     this.scene.background = null;
     this.scene.fog = null;
     this.renderer.setClearColor(0x000000, 0);
 
-    if (this.state.cameraActive) {
-      this.starMat.uniforms.uBaseAlpha.value = recording ? 0.98 : 0.88;
-      this.milkyWayMat.opacity = recording ? 0.36 : 0.28;
+    if (this.state.cameraActive && mode !== 'home') {
+      this.starMat.uniforms.uBaseAlpha.value = recording ? 0.98 : mode === 'pin' ? 0.0 : 0.85;
+      this.milkyWayMat.opacity = recording ? 0.36 : mode === 'pin' ? 0.0 : 0.25;
+      this.galaxyMat.uniforms.uAlpha.value = recording ? 0.82 : mode === 'pin' ? 0.0 : 0.52;
+      this.nebulaMaterials.forEach((m) => {
+        m.opacity = recording ? 0.42 : mode === 'pin' ? 0.0 : 0.28;
+      });
     } else {
       this.starMat.uniforms.uBaseAlpha.value = 1.0;
-      this.milkyWayMat.opacity = recording ? 0.44 : 0.56;
+      this.milkyWayMat.opacity = recording ? 0.44 : 0.58;
+      this.galaxyMat.uniforms.uAlpha.value = recording ? 0.88 : 0.82;
+      this.nebulaMaterials.forEach((m) => {
+        m.opacity = recording ? 0.48 : 0.54;
+      });
     }
   }
 
@@ -406,6 +558,7 @@ export class SecretLensScene {
     this.renderer.setPixelRatio(pixelRatio);
     this.starMat.uniforms.uPixelRatio.value = pixelRatio;
     this.dustMat.uniforms.uPixelRatio.value = pixelRatio;
+    this.galaxyMat.uniforms.uPixelRatio.value = pixelRatio;
   }
 
   private scheduleNextFrame(): void {
@@ -474,9 +627,14 @@ export class SecretLensScene {
     this.universe.animate(elapsed);
     this.wormhole.animate(elapsed);
 
-    // GPU shader twinkle & gentle deep-cosmos drift
+    // GPU shader twinkle, 3D spiral galaxy spin & gentle deep-cosmos nebula drift
     this.starMat.uniforms.uTime.value = elapsed;
     this.dustMat.uniforms.uTime.value = elapsed;
+    this.galaxyMat.uniforms.uTime.value = elapsed;
+    this.galaxyPoints.rotation.y = elapsed * 0.036;
+    this.nebulaMeshes.forEach((m, idx) => {
+      m.rotation.z = elapsed * (idx % 2 === 0 ? 0.012 : -0.01) + idx;
+    });
     this.starPoints.rotation.z = elapsed * 0.0025;
     this.starPoints.rotation.y = elapsed * 0.0018;
     this.milkyWayMesh.rotation.z = THREE.MathUtils.degToRad(-12) + elapsed * 0.0015;
@@ -498,6 +656,11 @@ export class SecretLensScene {
     this.starMat.dispose();
     this.dustGeo.dispose();
     this.dustMat.dispose();
+    this.galaxyGeo.dispose();
+    this.galaxyMat.dispose();
+    this.nebulaGeo.dispose();
+    this.nebulaMaterials.forEach((m) => m.dispose());
+    this.nebulaTextures.forEach((t) => t.dispose());
     this.milkyWayGeo.dispose();
     this.milkyWayMat.dispose();
     this.milkyWayTex.dispose();

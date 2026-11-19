@@ -3,18 +3,23 @@ import {
   Camera,
   Clock,
   Compass,
+  Crown,
   FolderOpen,
+  Gift,
   Globe,
+  HardDriveDownload,
   Lock,
   Mic,
   MicOff,
   Square,
   Trash2,
+  VenetianMask,
   X,
 } from 'lucide-react';
 import { ARStory, Language, MediaKind, VisibilityMode, VisualTargetSignature } from '../types/story';
 import { I18N } from '../utils/i18n';
 import {
+  HUNDRED_YEARS_MS,
   compressImageFile,
   getInvitesCount,
   getVideoDuration,
@@ -30,12 +35,17 @@ interface CreationStudioModalProps {
   viewYaw: number;
   viewPitch: number;
   viewRoll: number;
+  trueCompassHeading: number | null;
   targetSnapshot: VisualTargetSignature | null;
   userLat: number;
   userLng: number;
   streakDays: number;
+  isVipUnlocked: boolean;
+  vipTxHash?: string;
+  onOpenVipModal: () => void;
   onClose: () => void;
   onCreated: (story: ARStory) => void;
+  onExportBackup: () => Promise<void>;
   onToast: (msg: string) => void;
 }
 
@@ -60,12 +70,17 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
   viewYaw,
   viewPitch,
   viewRoll,
+  trueCompassHeading,
   targetSnapshot,
   userLat,
   userLng,
   streakDays,
+  isVipUnlocked,
+  vipTxHash,
+  onOpenVipModal,
   onClose,
   onCreated,
+  onExportBackup,
   onToast,
 }) => {
   const dict = I18N[lang];
@@ -76,6 +91,9 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
   const [visibility, setVisibility] = useState<VisibilityMode>('public');
   const [pin, setPin] = useState('');
   const [unlockAtStr, setUnlockAtStr] = useState('');
+  const [pinTier, setPinTier] = useState<'free' | 'vip'>(() => (isVipUnlocked ? 'vip' : 'free'));
+  const [isGiftBox, setIsGiftBox] = useState(false);
+  const [isAnonymous, setIsAnonymous] = useState(false);
 
   const [mediaType, setMediaType] = useState<MediaKind>(null);
   const [mediaData, setMediaData] = useState<string | null>(null);
@@ -98,6 +116,12 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
+    if (isVipUnlocked) {
+      setPinTier('vip');
+    }
+  }, [isVipUnlocked]);
+
+  useEffect(() => {
     if (!open) {
       if (recognitionRef.current && isDictating) {
         try {
@@ -114,9 +138,14 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
 
   if (!open) return null;
 
+  const usingVipTier = isVipUnlocked && pinTier === 'vip';
+
   const words = storyText.trim() ? storyText.trim().split(/\s+/).filter(Boolean) : [];
   const wordCount = words.length;
-  const normalizedHeading = ((Math.round(viewYaw) % 360) + 360) % 360;
+  const normalizedHeading =
+    trueCompassHeading !== null
+      ? ((Math.round(trueCompassHeading) % 360) + 360) % 360
+      : ((Math.round(viewYaw) % 360) + 360) % 360;
 
   const handleStoryChange = (val: string) => {
     const w = val.trim().split(/\s+/).filter(Boolean);
@@ -198,17 +227,23 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
       }
     } else if (file.type.startsWith('video/')) {
       const duration = await getVideoDuration(file);
-      if (duration > 10.6) {
-        onToast('⚠️ Please keep video within 10 seconds.');
+      const maxSecs = usingVipTier ? 60.6 : 10.6;
+      const maxMb = usingVipTier ? 48 : 16;
+      if (duration > maxSecs) {
+        onToast(
+          usingVipTier
+            ? '⚠️ VIP HD video limit is 60 seconds.'
+            : '⚠️ Free video limit is 10s! Unlock VIP Royal ($1 / ₹49) for 60s HD Video.'
+        );
         e.target.value = '';
         return;
       }
-      if (file.size > 16 * 1024 * 1024) {
-        onToast('⚠️ Video file too large (max 16 MB for offline storage).');
+      if (file.size > maxMb * 1024 * 1024) {
+        onToast(`⚠️ Video file too large (max ${maxMb} MB for 100-year offline storage).`);
         e.target.value = '';
         return;
       }
-      setMediaStatus(`Preparing ${sourceLabel} 10s AR video...`);
+      setMediaStatus(`Preparing ${sourceLabel} ${usingVipTier ? '60s VIP HD' : '10s'} AR video...`);
       const reader = new FileReader();
       reader.onload = () => {
         setMediaType('video');
@@ -272,12 +307,12 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
     e.preventDefault();
     if (submitting) return;
 
-    const cleanAuthor = author.trim();
+    const cleanAuthor = isAnonymous ? '🎭 Mysterious Soul' : author.trim();
     const cleanHeadline = headline.trim();
     const cleanStory = storyText.trim();
     const cleanPin = pin.trim();
 
-    if (!cleanAuthor || !cleanHeadline) {
+    if ((!isAnonymous && !cleanAuthor) || !cleanHeadline) {
       onToast('⚠️ Please fill in Author Name and Headline.');
       return;
     }
@@ -306,7 +341,8 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
         if (ts > Date.now()) unlockAt = ts;
       }
 
-      const id = `user_${Date.now()}`;
+      const now = Date.now();
+      const id = `user_${now}`;
       let savedMediaData = mediaData;
       let mediaIdbKey: string | null = null;
       if (savedMediaData && savedMediaData.length > 220000) {
@@ -327,8 +363,8 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
       const newCard: ARStory = {
         id,
         isDemo: false,
-        author: cleanAuthor,
-        rankBadge: getRankBadge(invites),
+        author: cleanAuthor || '🎭 Mysterious Soul',
+        rankBadge: usingVipTier ? '👑 VIP Royal Eternal' : getRankBadge(invites),
         category,
         headline: cleanHeadline,
         story: cleanStory || '(Multimedia AR Hologram)',
@@ -343,6 +379,7 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
         audioIdbKey,
         azimuth: Math.round(viewYaw),
         compassHeading: normalizedHeading,
+        hasTrueCompass: trueCompassHeading !== null,
         elevation: Math.round(viewPitch),
         rollGamma: Math.round(viewRoll),
         distanceMeters: 0,
@@ -350,8 +387,13 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
         lng: userLng,
         views: 1,
         reactions: { heart: 1, blessing: 0, mindblown: 0 },
-        createdAt: Date.now(),
-        hasGoldenAura: streakDays >= 3,
+        createdAt: now,
+        expiresAt: now + HUNDRED_YEARS_MS,
+        hasGoldenAura: usingVipTier || streakDays >= 3,
+        isVip: usingVipTier,
+        vipTxHash: usingVipTier ? vipTxHash : undefined,
+        isGiftBox,
+        isAnonymous,
         replies: [],
         visualTarget: targetSnapshot || null,
       };
@@ -364,6 +406,8 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
       setVisibility('public');
       setPin('');
       setUnlockAtStr('');
+      setIsGiftBox(false);
+      setIsAnonymous(false);
       setMediaType(null);
       setMediaData(null);
       setMediaStatus('');
@@ -408,24 +452,82 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
         </div>
 
         {targetSnapshot?.thumbnailDataUrl && (
-          <div className="mb-3 flex items-center gap-3 rounded-2xl border border-[#34f5a8]/45 bg-[#051a14]/85 px-3 py-2">
+          <div className="mb-3 flex items-center gap-2.5 rounded-2xl border border-[#34f5a8]/45 bg-[#051a14]/85 px-3 py-2">
             <img
               src={targetSnapshot.thumbnailDataUrl}
               alt="Locked Center Reticle Target"
               className="w-10 h-10 rounded-lg object-cover border border-[#f5c542]/70 shrink-0"
             />
+            {targetSnapshot.ghostOutlineDataUrl && (
+              <img
+                src={targetSnapshot.ghostOutlineDataUrl}
+                alt="Wall Ghost Edge Outline"
+                className="w-10 h-10 rounded-lg object-cover border border-[#38e8ff]/55 bg-[#020612] shrink-0"
+              />
+            )}
             <div className="min-w-0 text-xs">
               <p className="font-bold text-[#b8ffe2]">
-                🎯 {lang === 'hi' ? 'सटीक विजुअल टारगेट लॉक कैप्चर हो गया!' : 'Pinpoint Visual + 3D Target Locked!'}
+                🛡️ {lang === 'hi' ? 'अखंड ट्रिपल-लॉक + वॉल आउटलाइन सेव!' : 'Akhand Triple-Lock + Wall Ghost Outline Captured!'}
               </p>
               <p className="text-[11px] text-[#9ecdb8] truncate">
                 {lang === 'hi'
-                  ? 'यह संदेश इसी पत्ती / वस्तु और कोण पर चिपका रहेगा'
-                  : 'Message stays anchored to this exact leaf / spot & camera angle'}
+                  ? 'यह याद 100 साल तक इसी दीवार / जगह पर अमर रहेगी'
+                  : 'Anchored to this exact wall & 3m GPS for 100 Years Forever'}
               </p>
             </div>
           </div>
         )}
+
+        {/* Free vs VIP Royal Eternal Selector (Both Last 100 Years Forever) */}
+        <div className="mb-3 rounded-2xl border border-[#f5c542]/45 bg-[#120d03]/85 p-2.5">
+          <div className="flex items-center justify-between text-[11px] font-extrabold text-[#fff0a8] mb-2">
+            <span>{dict.eternal100Badge}</span>
+            {!isVipUnlocked && (
+              <button
+                type="button"
+                onClick={onOpenVipModal}
+                className="text-[#ffe98a] underline hover:text-white cursor-pointer"
+              >
+                Unlock VIP ($1 / ₹49)
+              </button>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setPinTier('free')}
+              className={`min-h-[40px] px-2.5 py-1.5 rounded-xl border text-left transition cursor-pointer ${
+                !usingVipTier
+                  ? 'border-[#34f5a8] bg-[#06241a]/90 text-[#b8ffe2]'
+                  : 'border-white/15 bg-[#050a18] text-[#9eb0d6]'
+              }`}
+            >
+              <div className="text-xs font-extrabold">🆓 Free Pin (100 Years)</div>
+              <div className="text-[10px] opacity-85">2,000w · Photo · 10s Video</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (isVipUnlocked) {
+                  setPinTier('vip');
+                } else {
+                  onOpenVipModal();
+                }
+              }}
+              className={`min-h-[40px] px-2.5 py-1.5 rounded-xl border text-left transition cursor-pointer ${
+                usingVipTier
+                  ? 'border-[#fff1a8] bg-gradient-to-r from-[#4b3507] to-[#2b1e04] text-[#fff4b8] shadow-[0_0_16px_rgba(245,197,66,0.4)]'
+                  : 'border-[#f5c542]/50 bg-[#1a1305]/80 text-[#ffe69a] hover:border-[#f5c542]'
+              }`}
+            >
+              <div className="text-xs font-extrabold flex items-center gap-1">
+                <Crown className="w-3.5 h-3.5 text-[#f5c542] shrink-0" />
+                <span>VIP Royal ($1 / ₹49)</span>
+              </div>
+              <div className="text-[10px] opacity-90">Diamond Temple · Star · 60s HD</div>
+            </button>
+          </div>
+        </div>
 
         <form onSubmit={handleSubmit} className="space-y-3.5">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -436,11 +538,12 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
               <input
                 type="text"
                 maxLength={40}
-                value={author}
+                disabled={isAnonymous}
+                value={isAnonymous ? '🎭 Mysterious Soul' : author}
                 onChange={(e) => setAuthor(e.target.value)}
                 placeholder="e.g. Aarav / आरव"
-                required
-                className="w-full rounded-xl border border-[#f5c542]/35 bg-[#030816]/90 text-white text-sm px-3 py-2.5 focus:outline-none focus:border-[#f5c542]"
+                required={!isAnonymous}
+                className="w-full rounded-xl border border-[#f5c542]/35 bg-[#030816]/90 text-white text-sm px-3 py-2.5 focus:outline-none focus:border-[#f5c542] disabled:opacity-65"
               />
             </div>
 
@@ -686,12 +789,50 @@ export const CreationStudioModal: React.FC<CreationStudioModalProps> = ({
             </div>
           </div>
 
+          {/* Surprise Gift Box & Anonymous Whisper Toggles */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setIsGiftBox((v) => !v)}
+              className={`min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition cursor-pointer ${
+                isGiftBox
+                  ? 'border-[#f5c542] bg-[#362607] text-[#fff4b8] shadow-[0_0_12px_rgba(245,197,66,0.35)]'
+                  : 'border-white/20 bg-[#071028] text-[#c7d6f5]'
+              }`}
+            >
+              <Gift className="w-3.5 h-3.5 text-[#f5c542] shrink-0" />
+              <span className="truncate">{dict.vipGiftBoxLabel}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsAnonymous((v) => !v)}
+              className={`min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition cursor-pointer ${
+                isAnonymous
+                  ? 'border-[#38e8ff] bg-[#082242] text-[#d4f9ff] shadow-[0_0_12px_rgba(56,232,255,0.3)]'
+                  : 'border-white/20 bg-[#071028] text-[#c7d6f5]'
+              }`}
+            >
+              <VenetianMask className="w-3.5 h-3.5 text-[#38e8ff] shrink-0" />
+              <span className="truncate">{dict.vipAnonLabel}</span>
+            </button>
+          </div>
+
           <button
             type="submit"
             disabled={submitting}
             className="w-full min-h-[48px] rounded-xl bg-gradient-to-r from-[#fff1aa] via-[#f5c542] to-[#cf8c15] text-[#160e00] font-extrabold text-sm sm:text-base shadow-[0_10px_26px_rgba(245,197,66,0.42)] hover:brightness-105 active:scale-[0.99] transition cursor-pointer disabled:opacity-60"
           >
             {submitting ? 'Pinning into 3m AR Portal...' : dict.pinSubmitBtn}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void onExportBackup()}
+            className="w-full min-h-[40px] inline-flex items-center justify-center gap-2 rounded-xl border border-[#34f5a8]/55 bg-[#051a14]/90 text-[#b8ffe2] text-xs font-extrabold hover:bg-[#34f5a8]/20 transition cursor-pointer"
+          >
+            <HardDriveDownload className="w-4 h-4 text-[#34f5a8]" />
+            <span>{dict.backup10YrBtn}</span>
           </button>
         </form>
       </div>

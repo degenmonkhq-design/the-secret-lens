@@ -11,10 +11,12 @@ import { ReferralHubModal } from './components/ReferralHubModal';
 import { ScanIntroOverlay } from './components/ScanIntroOverlay';
 import { SecretWishModal } from './components/SecretWishModal';
 import { TopHud } from './components/TopHud';
-import { ConfirmDialog, InstallGuideModal, ShareAppModal } from './components/UtilityModals';
+import { BackupVaultModal, ConfirmDialog, InstallGuideModal, ShareAppModal } from './components/UtilityModals';
+import { VipUpgradeModal } from './components/VipUpgradeModal';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import {
+  AppMode,
   ARStory,
   ConfirmPromptState,
   Language,
@@ -32,8 +34,10 @@ import {
   RECORD_KEY,
   REPORTED_KEY,
   deleteMediaBlob,
+  exportAllStoriesBackup,
   getInvitesCount,
   getWorldRecordCount,
+  importStoriesBackup,
   loadMediaBlob,
   loadStories,
   persistStories,
@@ -44,7 +48,9 @@ import { attachSpiritEcho } from './utils/spiritAudio';
 import { sufiTune } from './utils/sufiTune';
 import { triggerGentleHaptic } from './utils/haptics';
 import { getOrInitDailyStreak, recordDailyExplorerAction } from './utils/streakStorage';
+import { VipLicenseState, loadVipLicense } from './utils/vipPayment';
 
+export const OWNER_METAMASK_ADDRESS = '0x7e180a6353fE135eE30785EB57F4b7791ABf3eB7';
 const TUNE_PREF_KEY = 'tsl_tune_enabled_v1';
 
 export default function App() {
@@ -78,15 +84,18 @@ export default function App() {
   });
   const hasUserInteractedRef = useRef(false);
 
+  const [appMode, setAppMode] = useState<AppMode>('home');
   const [scanVisible, setScanVisible] = useState(true);
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraFacing, setCameraFacing] = useState<'environment' | 'user'>('environment');
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const userManuallyTurnedCamOffRef = useRef(false);
   const [showCameraRetryBtn, setShowCameraRetryBtn] = useState(false);
 
   const [userLat, setUserLat] = useState(DEFAULT_LAT);
   const [userLng, setUserLng] = useState(DEFAULT_LNG);
+  const [gpsTick, setGpsTick] = useState(0);
   const [simulate10mAway, setSimulate10mAway] = useState(false);
   const hasRealGpsAnchoredRef = useRef(false);
 
@@ -97,6 +106,7 @@ export default function App() {
   const viewYawRef = useRef(0);
   const viewPitchRef = useRef(0);
   const viewRollRef = useRef(0);
+  const trueCompassRef = useRef<number | null>(null);
   const gyroRequestRef = useRef<(() => Promise<boolean>) | null>(null);
   const captureTargetRef = useRef<(() => VisualTargetSignature | null) | null>(null);
   const recorderRef = useRef<ARRecorderControls | null>(null);
@@ -131,6 +141,9 @@ export default function App() {
   const [readerStoryId, setReaderStoryId] = useState<string | null>(null);
   const [unlockedIds, setUnlockedIds] = useState<Set<string>>(() => new Set());
   const [referOpen, setReferOpen] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [vipLicense, setVipLicense] = useState<VipLicenseState>(() => loadVipLicense());
+  const [vipModalOpen, setVipModalOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [confirmState, setConfirmState] = useState<ConfirmPromptState | null>(null);
@@ -241,6 +254,7 @@ export default function App() {
 
   const handleToggleCamera = useCallback(async () => {
     if (cameraActive) {
+      userManuallyTurnedCamOffRef.current = true;
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((track) => track.stop());
         cameraStreamRef.current = null;
@@ -250,6 +264,7 @@ export default function App() {
       setShowCameraRetryBtn(false);
       showToast('🚫 Cam: OFF — Deep Black-Blue Cosmos & 3m AR Active');
     } else {
+      userManuallyTurnedCamOffRef.current = false;
       const ok = await startCamera(cameraFacing);
       if (ok) {
         showToast(
@@ -264,6 +279,7 @@ export default function App() {
   }, [cameraActive, cameraFacing, startCamera, showToast]);
 
   const handleFlipCamera = useCallback(async () => {
+    userManuallyTurnedCamOffRef.current = false;
     const nextFacing = cameraFacing === 'environment' ? 'user' : 'environment';
     const ok = await startCamera(nextFacing);
     if (ok) {
@@ -276,6 +292,28 @@ export default function App() {
       showToast('⚠️ Could not switch camera lens on this device.');
     }
   }, [cameraFacing, startCamera, showToast]);
+
+  const handleSwitchMode = useCallback(
+    (nextMode: AppMode) => {
+      setAppMode(nextMode);
+      if (nextMode === 'home') {
+        ambientAudioRef.current?.pause();
+        if (cameraStreamRef.current) {
+          cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+          cameraStreamRef.current = null;
+        }
+        setCameraStream(null);
+        setCameraActive(false);
+        setShowCameraRetryBtn(false);
+        return;
+      }
+
+      if (!cameraActive && !userManuallyTurnedCamOffRef.current) {
+        void startCamera(cameraFacing);
+      }
+    },
+    [cameraActive, cameraFacing, startCamera]
+  );
 
   const handleToggleSimulate10m = useCallback(() => {
     setSimulate10mAway((prev) => {
@@ -292,8 +330,7 @@ export default function App() {
   useEffect(() => {
     const t = window.setTimeout(() => {
       setScanVisible(false);
-      void startCamera('environment');
-    }, 1500);
+    }, 1400);
 
     const DevOrient = window.DeviceOrientationEvent as unknown as {
       requestPermission?: () => Promise<'granted' | 'denied'>;
@@ -306,38 +343,76 @@ export default function App() {
       window.clearTimeout(t);
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
-  }, [startCamera]);
-
-  useEffect(() => {
-    if (!navigator.geolocation) return;
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        setUserLat(lat);
-        setUserLng(lng);
-
-        if (!hasRealGpsAnchoredRef.current) {
-          hasRealGpsAnchoredRef.current = true;
-          setStories((prev) => {
-            const updated = reanchorDemosToFirstFix(prev, lat, lng);
-            persistStories(updated);
-            return updated;
-          });
-        }
-      },
-      () => {},
-      { enableHighAccuracy: true, maximumAge: 5000 }
-    );
-    return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
   useEffect(() => {
-    if (!radarInfo?.inPortalRange && ambientAudioRef.current && !ambientAudioRef.current.paused) {
-      ambientAudioRef.current.pause();
+    const heartbeatId = window.setInterval(() => {
+      setGpsTick((prev) => (prev + 1) % 1000000);
+    }, 1000);
+
+    if (!navigator.geolocation) {
+      return () => window.clearInterval(heartbeatId);
     }
 
-    if (!radarInfo || typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
+    const applyFix = (pos: GeolocationPosition) => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      setUserLat(lat);
+      setUserLng(lng);
+      setGpsTick((prev) => (prev + 1) % 1000000);
+
+      if (!hasRealGpsAnchoredRef.current) {
+        hasRealGpsAnchoredRef.current = true;
+        setStories((prev) => {
+          const updated = reanchorDemosToFirstFix(prev, lat, lng);
+          persistStories(updated);
+          return updated;
+        });
+      }
+    };
+
+    const watchId = navigator.geolocation.watchPosition(
+      applyFix,
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 6000 }
+    );
+
+    let polling = false;
+    const pollId = window.setInterval(() => {
+      if (polling) return;
+      polling = true;
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          polling = false;
+          applyFix(pos);
+        },
+        () => {
+          polling = false;
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 4500 }
+      );
+    }, 2500);
+
+    return () => {
+      window.clearInterval(heartbeatId);
+      window.clearInterval(pollId);
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (appMode !== 'scan' || !radarInfo?.inPortalRange) {
+      if (ambientAudioRef.current && !ambientAudioRef.current.paused) {
+        ambientAudioRef.current.pause();
+      }
+    }
+
+    if (
+      appMode !== 'scan' ||
+      !radarInfo ||
+      typeof navigator === 'undefined' ||
+      typeof navigator.vibrate !== 'function'
+    ) {
       return;
     }
 
@@ -363,7 +438,7 @@ export default function App() {
         navigator.vibrate([60, 120, 60]);
       }
     }
-  }, [radarInfo]);
+  }, [appMode, radarInfo]);
 
   useEffect(() => {
     ambientAudioRef.current = new Audio();
@@ -591,7 +666,11 @@ export default function App() {
       return next;
     });
     setCreateOpen(false);
-    showToast('✨ Pinned at exact GPS & Compass! Step 4 paces away to test 3m lock.');
+    showToast(
+      newCard.isVip
+        ? '👑 VIP Royal Eternal Memory Pinned for 100 Years! Named Star added to Cosmic Sky!'
+        : '🧱 Pinned for 100 Years Forever to this wall & 3m GPS! Tap "Scan & Reveal" to view.'
+    );
   };
 
   const handleCatchShootingStar = useCallback(() => {
@@ -643,6 +722,35 @@ export default function App() {
       if (accepted) showToast('📲 THE SECRET LENS Installed!');
     } else {
       setInstallOpen(true);
+    }
+  };
+
+  const handleExportBackupJson = async () => {
+    try {
+      const jsonStr = await exportAllStoriesBackup(stories);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const stamp = new Date().toISOString().slice(0, 10);
+      a.download = `the-secret-lens-100yr-backup-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('💾 100-Year Eternal JSON Memory Backup Downloaded!');
+    } catch {
+      showToast('⚠️ Could not export backup file.');
+    }
+  };
+
+  const handleImportBackupJson = async (jsonText: string) => {
+    try {
+      const res = await importStoriesBackup(jsonText, stories);
+      setStories(res.stories);
+      showToast(`✅ Restored ${res.added} new + ${res.updated} existing AR memories!`);
+    } catch {
+      showToast('❌ Invalid backup JSON file.');
     }
   };
 
@@ -739,10 +847,19 @@ export default function App() {
   };
 
   const handleOrientationUpdate = useCallback(
-    (yaw: number, pitch: number, roll: number, label: string) => {
+    (
+      yaw: number,
+      pitch: number,
+      roll: number,
+      label: string,
+      trueCompassHeading: number | null = null
+    ) => {
       viewYawRef.current = yaw;
       viewPitchRef.current = pitch;
       viewRollRef.current = roll;
+      if (trueCompassHeading !== null) {
+        trueCompassRef.current = trueCompassHeading;
+      }
       setGyroLabel(label);
     },
     []
@@ -752,7 +869,7 @@ export default function App() {
   const effectiveUserLat = simulate10mAway ? userLat + 0.000095 : userLat;
 
   return (
-    <main className="relative w-full h-full overflow-hidden select-none">
+    <main className="relative w-screen max-w-full h-[100dvh] overflow-hidden overflow-x-hidden box-border select-none">
       <ScanIntroOverlay
         visible={scanVisible}
         title={dict.scanTitle}
@@ -761,9 +878,11 @@ export default function App() {
 
       <ARViewport
         lang={lang}
+        appMode={appMode}
         stories={visibleStories}
         userLat={effectiveUserLat}
         userLng={userLng}
+        gpsTick={gpsTick}
         cameraActive={cameraActive}
         cameraFacing={cameraFacing}
         cameraStream={cameraStream}
@@ -787,21 +906,26 @@ export default function App() {
 
       <TopHud
         lang={lang}
+        appMode={appMode}
         cameraActive={cameraActive}
         cameraFacing={cameraFacing}
         isMuted={isMuted}
         tuneEnabled={tuneEnabled}
         worldRecordCount={worldRecordCount}
         streakDays={streakDays}
+        isVipUnlocked={vipLicense.unlocked}
         isInstalled={isInstalled}
         cleanReelMode={cleanReelMode}
         isRecordingAR={isRecordingAR}
+        onSwitchMode={handleSwitchMode}
+        onOpenVipModal={() => setVipModalOpen(true)}
         onToggleCamera={() => void handleToggleCamera()}
         onFlipCamera={() => void handleFlipCamera()}
         onToggleLang={handleToggleLang}
         onToggleMute={handleToggleMute}
         onToggleTune={handleToggleTune}
         onOpenRefer={() => setReferOpen(true)}
+        onOpenBackup={() => setBackupOpen(true)}
         onShareApp={handleShareApp}
         onInstallApp={handleInstallApp}
         onClearNotes={handleClearMyNotes}
@@ -809,6 +933,7 @@ export default function App() {
 
       <BottomHud
         lang={lang}
+        appMode={appMode}
         stories={visibleStories}
         userLat={effectiveUserLat}
         userLng={userLng}
@@ -821,8 +946,14 @@ export default function App() {
         cleanCountdown={cleanCountdown}
         isRecordingAR={isRecordingAR}
         recordCountdown={recordCountdown}
+        isVipUnlocked={vipLicense.unlocked}
+        onOpenVipModal={() => setVipModalOpen(true)}
+        onSwitchMode={handleSwitchMode}
         onRequestGyro={handleRequestGyro}
-        onRetryCamera={() => void startCamera(cameraFacing)}
+        onRetryCamera={() => {
+          userManuallyTurnedCamOffRef.current = false;
+          void startCamera(cameraFacing);
+        }}
         onToggleSimulate10m={handleToggleSimulate10m}
         onStartCleanReel={handleStartCleanReel}
         onExitCleanReel={handleExitCleanReel}
@@ -856,12 +987,17 @@ export default function App() {
         viewYaw={viewYawRef.current}
         viewPitch={viewPitchRef.current}
         viewRoll={viewRollRef.current}
+        trueCompassHeading={trueCompassRef.current}
         targetSnapshot={pendingTargetSnapshot}
         userLat={userLat}
         userLng={userLng}
         streakDays={streakDays}
+        isVipUnlocked={vipLicense.unlocked}
+        vipTxHash={vipLicense.txHash}
+        onOpenVipModal={() => setVipModalOpen(true)}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreatedStory}
+        onExportBackup={handleExportBackupJson}
         onToast={showToast}
       />
 
@@ -871,6 +1007,7 @@ export default function App() {
         viewYaw={viewYawRef.current}
         viewPitch={viewPitchRef.current}
         viewRoll={viewRollRef.current}
+        trueCompassHeading={trueCompassRef.current}
         targetSnapshot={pendingTargetSnapshot}
         userLat={userLat}
         userLng={userLng}
@@ -923,6 +1060,15 @@ export default function App() {
         onCopyLink={handleCopyInviteLink}
       />
 
+      <BackupVaultModal
+        open={backupOpen}
+        lang={lang}
+        storyCount={stories.length}
+        onClose={() => setBackupOpen(false)}
+        onExportJson={handleExportBackupJson}
+        onImportJson={handleImportBackupJson}
+      />
+
       <InstallGuideModal
         open={installOpen}
         isIOS={isIOS}
@@ -933,6 +1079,15 @@ export default function App() {
         open={shareOpen}
         onClose={() => setShareOpen(false)}
         onCopyUrl={handleCopyInviteLink}
+      />
+
+      <VipUpgradeModal
+        open={vipModalOpen}
+        lang={lang}
+        vipLicense={vipLicense}
+        onUnlocked={(lic) => setVipLicense(lic)}
+        onClose={() => setVipModalOpen(false)}
+        onToast={showToast}
       />
 
       <ConfirmDialog

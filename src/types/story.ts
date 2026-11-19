@@ -1,5 +1,7 @@
 export type Language = 'en' | 'hi';
 
+export type AppMode = 'home' | 'pin' | 'scan';
+
 export type VisibilityMode = 'public' | 'private';
 
 export type MediaKind = 'image' | 'video' | null;
@@ -22,6 +24,7 @@ export interface StoryReply {
 
 export interface VisualTargetSignature {
   thumbnailDataUrl?: string;
+  ghostOutlineDataUrl?: string;
   gridRgb: number[];
   colorHist: number[];
 }
@@ -47,6 +50,7 @@ export interface ARStory {
   audioIdbKey?: string | null;
   azimuth: number;
   compassHeading: number;
+  hasTrueCompass?: boolean;
   elevation: number;
   rollGamma?: number;
   distanceMeters: number;
@@ -55,7 +59,12 @@ export interface ARStory {
   views: number;
   reactions: Reactions;
   createdAt: number;
+  expiresAt?: number;
   hasGoldenAura?: boolean;
+  isVip?: boolean;
+  vipTxHash?: string;
+  isGiftBox?: boolean;
+  isAnonymous?: boolean;
   isWish?: boolean;
   replies?: StoryReply[];
   visualTarget?: VisualTargetSignature | null;
@@ -79,4 +88,6 @@ export interface ProximityRadarInfo {
   relYaw: number;
   inPortalRange: boolean;
   heatLevel: number; // 0 to 1 intensity boost as user gets closer
+  wallAlignmentPct: number; // 0 to 100 Akhand Triple-Lock Alignment
+  targetLocked: boolean;
 }

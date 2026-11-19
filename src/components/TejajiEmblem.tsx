@@ -14,11 +14,11 @@ export const TejajiEmblem: React.FC<TejajiEmblemProps> = ({ className = '' }) =>
       className={`inline-flex flex-col items-center justify-center shrink-0 select-none ${className}`}
       title="Veer Tejaji Maharaj Sacred Blessing"
     >
-      <div className="relative w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-[#070d20]/95 border border-[#f5c542]/80 shadow-[0_0_18px_rgba(245,197,66,0.55),inset_0_0_10px_rgba(245,197,66,0.28)] flex items-center justify-center">
+      <div className="relative w-8 h-8 min-[390px]:w-9 min-[390px]:h-9 sm:w-11 sm:h-11 rounded-full bg-[#070d20]/95 border border-[#f5c542]/80 shadow-[0_0_18px_rgba(245,197,66,0.55),inset_0_0_10px_rgba(245,197,66,0.28)] flex items-center justify-center">
         <svg
           xmlns="http://www.w3.org/2000/svg"
           viewBox="0 0 100 100"
-          className="w-8 h-8 sm:w-9 sm:h-9 drop-shadow-[0_0_8px_rgba(255,220,110,0.85)]"
+          className="w-6 h-6 min-[390px]:w-7 min-[390px]:h-7 sm:w-9 sm:h-9 drop-shadow-[0_0_8px_rgba(255,220,110,0.85)]"
           aria-label="Veer Tejaji Maharaj Sacred Emblem"
         >
           <defs>

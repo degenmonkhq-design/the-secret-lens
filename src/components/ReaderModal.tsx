@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Clock,
+  Crown,
   Eye,
   Film,
   Flag,
   Flame,
+  Gift,
   Heart,
   Lock,
   MessageCircle,
@@ -26,7 +28,7 @@ import {
 } from '../utils/mediaStorage';
 import { generateAndDownloadReelPoster } from '../utils/posterGenerator';
 import { containsAbuseOrSpam, getRankBadge } from '../utils/safety';
-import { attachSpiritEcho } from '../utils/spiritAudio';
+import { attachSpiritEcho, playDivineTempleChime } from '../utils/spiritAudio';
 
 interface ReaderModalProps {
   story: ARStory | null;
@@ -77,6 +79,7 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
   const [isRecordingReply, setIsRecordingReply] = useState(false);
   const [replyRecSecsLeft, setReplyRecSecsLeft] = useState(15);
   const [replySubmitting, setReplySubmitting] = useState(false);
+  const [giftUnwrapped, setGiftUnwrapped] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const replyRecorderRef = useRef<MediaRecorder | null>(null);
@@ -89,6 +92,7 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
     setReplyOpen(false);
     setReplyText('');
     setReplyAudioData(null);
+    setGiftUnwrapped(false);
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
@@ -98,6 +102,13 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
     }
 
     if (!story) return;
+
+    const lockedNow =
+      (story.visibility === 'private' && !unlockedIds.has(story.id)) ||
+      Boolean(story.unlockAt && Date.now() < story.unlockAt);
+    if (story.isVip && !lockedNow && !story.isGiftBox) {
+      playDivineTempleChime();
+    }
 
     let cancelled = false;
     (async () => {
@@ -290,6 +301,9 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
     }
   };
 
+  const isGiftPending = Boolean(story.isGiftBox && !giftUnwrapped);
+  const displayAuthor = story.isAnonymous ? '🎭 Mysterious Soul' : story.author;
+
   return (
     <div
       className="fixed inset-0 z-50 bg-[#02050e]/92 flex items-center justify-center p-3 sm:p-4"
@@ -297,11 +311,33 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-xl max-h-[92dvh] overflow-y-auto rounded-3xl bg-gradient-to-b from-[#0b1634]/95 to-[#040712]/98 border-[1.5px] border-[#f5c542]/45 shadow-[0_24px_64px_rgba(0,0,0,0.85),0_0_36px_rgba(245,197,66,0.16)] p-5">
+      <div
+        className={`relative w-full max-w-xl max-h-[92dvh] overflow-y-auto rounded-3xl p-5 ${
+          story.isVip
+            ? 'bg-gradient-to-b from-[#231906]/98 via-[#0e1836]/98 to-[#040712]/98 border-2 border-[#fff0a8] shadow-[0_24px_72px_rgba(0,0,0,0.9),0_0_52px_rgba(245,197,66,0.42)]'
+            : 'bg-gradient-to-b from-[#0b1634]/95 to-[#040712]/98 border-[1.5px] border-[#f5c542]/45 shadow-[0_24px_64px_rgba(0,0,0,0.85),0_0_36px_rgba(245,197,66,0.16)]'
+        }`}
+      >
+        {/* VIP Rose-Petal Rain & Golden Firework Header Accent */}
+        {story.isVip && (
+          <div className="mb-3 rounded-2xl border border-[#f5c542]/65 bg-gradient-to-r from-[#3a2805]/90 via-[#5a3b08]/85 to-[#3a2805]/90 px-3 py-2 flex items-center justify-between gap-2 text-xs font-extrabold text-[#fff4b8]">
+            <span className="inline-flex items-center gap-1.5">
+              <Crown className="w-4 h-4 text-[#f5c542]" />
+              <span>💎 VIP Diamond-Gold Temple Portal</span>
+            </span>
+            <span className="text-[11px] text-[#ffb8d0]">🌹 Rose Petals & Chime</span>
+          </div>
+        )}
+
         <div className="flex items-start justify-between gap-3 pb-3 mb-4 border-b border-[#f5c542]/25">
           <div className="min-w-0">
-            <p className="text-xs font-semibold text-[#fff0a8] mb-0.5">
-              {story.rankBadge || '🌱 Explorer'} · {story.category}
+            <p className="text-xs font-semibold text-[#fff0a8] mb-0.5 flex flex-wrap items-center gap-1.5">
+              <span>
+                {story.rankBadge || '🌱 Explorer'} · {story.category}
+              </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#34f5a8]/15 border border-[#34f5a8]/40 text-[#b8ffe2]">
+                {dict.eternal100Badge}
+              </span>
             </p>
             <h2 className="font-hud text-base sm:text-lg font-bold text-[#fff4b8] leading-snug">
               {story.headline}
@@ -353,6 +389,29 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
             <div className="font-hud inline-block text-base font-bold text-[#fff0a8] bg-black/70 border border-[#f5c542] px-5 py-2.5 rounded-xl tabular-nums mb-4">
               {formatCountdown(story.unlockAt - nowMs)}
             </div>
+          </div>
+        ) : isGiftPending ? (
+          <div className="py-8 px-3 text-center">
+            <div className="w-20 h-20 mx-auto mb-4 rounded-3xl border-2 border-[#f5c542] bg-gradient-to-br from-[#3b2905] to-[#171104] flex items-center justify-center shadow-[0_0_38px_rgba(245,197,66,0.65)] animate-pulse-gold">
+              <Gift className="w-10 h-10 text-[#fff4b8]" />
+            </div>
+            <h3 className="font-hud text-lg font-extrabold text-[#fff4b8] mb-1">
+              🎁 Surprise Secret Gift Box!
+            </h3>
+            <p className="text-xs sm:text-sm text-[#c7d6f5] mb-5">
+              From <strong className="text-[#ffe98a]">{displayAuthor}</strong> · Sealed at this exact spot
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setGiftUnwrapped(true);
+                if (story.isVip) playDivineTempleChime();
+                onToast('🎁 Surprise Gift Unwrapped!');
+              }}
+              className="min-h-[48px] px-7 py-3 rounded-full bg-gradient-to-r from-[#fff3b0] via-[#f5c542] to-[#d69214] text-[#1a1000] font-extrabold text-sm shadow-[0_10px_30px_rgba(245,197,66,0.55)] hover:scale-105 transition cursor-pointer"
+            >
+              ✨ Tap to Unwrap Surprise Gift
+            </button>
           </div>
         ) : (
           <div>
@@ -413,7 +472,7 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
             )}
 
             <div className="flex items-center justify-between text-xs text-[#9eb0d6] mb-2">
-              <span>{story.author}</span>
+              <span>{displayAuthor}</span>
               <span className="inline-flex items-center gap-1 tabular-nums">
                 <Eye className="w-3.5 h-3.5 text-[#38e8ff]" />
                 {story.views} Views

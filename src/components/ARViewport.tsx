@@ -1,11 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Clock, Flag, Heart, Lock, MessageCircle, Mic, Sparkles } from 'lucide-react';
-import { ARStory, Language, ProximityRadarInfo, VisualTargetSignature } from '../types/story';
+import { Clock, Crown, Flag, Gift, Heart, Lock, MessageCircle, Mic, Sparkles, Star } from 'lucide-react';
+import { AppMode, ARStory, Language, ProximityRadarInfo, VisualTargetSignature } from '../types/story';
 import { I18N, formatCountdown } from '../utils/i18n';
 import { calculateDistanceMeters, loadMediaBlob } from '../utils/mediaStorage';
 import { triggerGentleHaptic } from '../utils/haptics';
+import { playDivineTempleChime } from '../utils/spiritAudio';
 import { sufiTune } from '../utils/sufiTune';
-import { captureCenterTargetSignature, matchVisualTargetAt } from '../utils/visualTarget';
+import {
+  captureCenterTargetSignature,
+  matchVisualTargetAt,
+  renderCenterGhostOutline,
+} from '../utils/visualTarget';
 import { SecretLensScene } from '../three/SecretLensScene';
 
 export interface ARRecorderControls {
@@ -15,9 +20,11 @@ export interface ARRecorderControls {
 
 interface ARViewportProps {
   lang: Language;
+  appMode: AppMode;
   stories: ARStory[];
   userLat: number;
   userLng: number;
+  gpsTick: number;
   cameraActive: boolean;
   cameraFacing: 'environment' | 'user';
   cameraStream: MediaStream | null;
@@ -29,7 +36,13 @@ interface ARViewportProps {
   onReportCard: (story: ARStory) => void;
   onCenteredCard: (story: ARStory, relYaw: number) => void;
   onRadarUpdate: (info: ProximityRadarInfo | null) => void;
-  onOrientationUpdate: (yaw: number, pitch: number, roll: number, label: string) => void;
+  onOrientationUpdate: (
+    yaw: number,
+    pitch: number,
+    roll: number,
+    label: string,
+    trueCompassHeading: number | null
+  ) => void;
   onCatchShootingStar: () => void;
   gyroRequestRef: React.MutableRefObject<(() => Promise<boolean>) | null>;
   captureTargetRef: React.MutableRefObject<(() => VisualTargetSignature | null) | null>;
@@ -41,9 +54,11 @@ interface ARViewportProps {
 
 export const ARViewport: React.FC<ARViewportProps> = ({
   lang,
+  appMode,
   stories,
   userLat,
   userLng,
+  gpsTick,
   cameraActive,
   cameraFacing,
   cameraStream,
@@ -71,6 +86,7 @@ export const ARViewport: React.FC<ARViewportProps> = ({
   const threeMountRef = useRef<HTMLDivElement | null>(null);
   const threeSceneRef = useRef<SecretLensScene | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const pinGhostCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const bubbleRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
 
@@ -79,7 +95,9 @@ export const ARViewport: React.FC<ARViewportProps> = ({
   const [centeredId, setCenteredId] = useState<string | null>(null);
   const [liveYaw, setLiveYaw] = useState(0);
   const [livePitch, setLivePitch] = useState(0);
+  const [liveCompass, setLiveCompass] = useState<number | null>(null);
   const [visualMatchFlags, setVisualMatchFlags] = useState<Record<string, boolean>>({});
+  const [visualMatchScores, setVisualMatchScores] = useState<Record<string, number>>({});
 
   const viewYawRef = useRef(0);
   const viewPitchRef = useRef(0);
@@ -88,9 +106,16 @@ export const ARViewport: React.FC<ARViewportProps> = ({
   const targetPitchRef = useRef(0);
   const targetRollRef = useRef(0);
   const gyroBaseAlphaRef = useRef<number | null>(null);
+  const trueCompassRef = useRef<number | null>(null);
+  const inRangeCacheRef = useRef<Record<string, boolean>>({});
   const visualMatchFlagsRef = useRef<Record<string, boolean>>({});
+  const visualMatchScoresRef = useRef<Record<string, number>>({});
+  const celebratedVipIdsRef = useRef<Set<string>>(new Set());
+  const rosePetalsRef = useRef<
+    Array<{ x: number; y: number; vx: number; vy: number; rot: number; vr: number; life: number; size: number }>
+  >([]);
   const stardustRef = useRef<
-    Array<{ x: number; y: number; vx: number; vy: number; life: number; r: number }>
+    Array<{ x: number; y: number; vx: number; vy: number; life: number; r: number; hue: 'gold' | 'cyan' }>
   >([]);
   const shootingStarsRef = useRef(
     Array.from({ length: 3 }, (_, i) => ({
@@ -105,6 +130,17 @@ export const ARViewport: React.FC<ARViewportProps> = ({
     }))
   );
 
+  const computeStoryRelYaw = (
+    s: ARStory,
+    yawVal: number,
+    compassVal: number | null
+  ): number => {
+    if (s.hasTrueCompass && compassVal !== null) {
+      return (((s.compassHeading || 0) - compassVal + 540) % 360) - 180;
+    }
+    return (((s.azimuth || 0) - yawVal + 540) % 360) - 180;
+  };
+
   const evaluatedStories = useMemo(() => {
     const visiblePool = isRecordingAR
       ? stories.filter((s) =>
@@ -114,15 +150,45 @@ export const ARViewport: React.FC<ARViewportProps> = ({
 
     return visiblePool.map((s) => {
       const dist = calculateDistanceMeters(userLat, userLng, s.lat, s.lng);
-      const relYaw = (((s.azimuth || 0) - liveYaw + 540) % 360) - 180;
+      const wasInRange = Boolean(inRangeCacheRef.current[s.id]);
+      // 3m-4m GPS hysteresis prevents flickering and guarantees reliable auto-reappear on return
+      const inRange = wasInRange ? dist <= 4.0 : dist <= 3.6;
+      inRangeCacheRef.current[s.id] = inRange;
+
+      const relYaw = computeStoryRelYaw(s, liveYaw, liveCompass);
       const relPitch = (s.elevation || 0) - livePitch;
-      const inRange = dist <= 3.0;
       const hasVisualTarget = Boolean(s.visualTarget);
       const facingCompass = hasVisualTarget
-        ? Math.abs(relYaw) <= 26 && Math.abs(relPitch) <= 26
-        : Math.abs(relYaw) <= 46 && Math.abs(relPitch) <= 38;
-      const visualOk =
-        !hasVisualTarget || !cameraActive || visualMatchFlags[s.id] !== false;
+        ? Math.abs(relYaw) <= 24 && Math.abs(relPitch) <= 24
+        : Math.abs(relYaw) <= 38 && Math.abs(relPitch) <= 34;
+
+      const visualLocked = hasVisualTarget && cameraActive && visualMatchFlags[s.id] === true;
+      const wallAligned =
+        !cameraActive ||
+        !hasVisualTarget ||
+        visualLocked ||
+        (Boolean(s.hasTrueCompass) &&
+          liveCompass !== null &&
+          Math.abs(relYaw) <= 14 &&
+          Math.abs(relPitch) <= 16);
+
+      const materialized = appMode === 'scan' && inRange && facingCompass && wallAligned;
+
+      // Compute 0%-100% Akhand Triple-Lock Alignment Score
+      const gpsScore = inRange ? 40 : Math.max(0, Math.round(40 * (1 - (dist - 3.6) / 14)));
+      const yawFactor = Math.max(0, 1 - Math.abs(relYaw) / 45);
+      const pitchFactor = Math.max(0, 1 - Math.abs(relPitch) / 40);
+      const angleScore = Math.round(35 * yawFactor * pitchFactor);
+      const vScoreVal = visualMatchScores[s.id] ?? (visualLocked ? 0.35 : 0);
+      const visScore =
+        !cameraActive || !hasVisualTarget
+          ? facingCompass
+            ? 25
+            : Math.round(18 * yawFactor)
+          : Math.round(Math.min(1, vScoreVal / 0.32) * 25);
+      const wallAlignmentPct = materialized
+        ? 100
+        : Math.max(4, Math.min(96, gpsScore + angleScore + visScore));
 
       return {
         story: { ...s, distanceMeters: dist },
@@ -131,20 +197,25 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         relPitch,
         inRange,
         facingCompass,
-        visualLocked: hasVisualTarget && cameraActive && visualMatchFlags[s.id] === true,
-        materialized: inRange && facingCompass && visualOk,
+        visualLocked,
+        wallAlignmentPct,
+        materialized,
       };
     });
   }, [
+    appMode,
     stories,
     userLat,
     userLng,
+    gpsTick,
     liveYaw,
     livePitch,
+    liveCompass,
     isRecordingAR,
     recordMessageFilter,
     cameraActive,
     visualMatchFlags,
+    visualMatchScores,
   ]);
 
   const evaluatedRef = useRef(evaluatedStories);
@@ -158,6 +229,9 @@ export const ARViewport: React.FC<ARViewportProps> = ({
 
   const cameraFacingRef = useRef(cameraFacing);
   cameraFacingRef.current = cameraFacing;
+
+  const appModeRef = useRef<AppMode>(appMode);
+  appModeRef.current = appMode;
 
   const activeRecordFilterRef = useRef<'mine' | 'all'>(recordMessageFilter);
   activeRecordFilterRef.current = recordMessageFilter;
@@ -175,16 +249,58 @@ export const ARViewport: React.FC<ARViewportProps> = ({
   onCatchShootingStarRef.current = onCatchShootingStar;
 
   const nearestHiddenPortal = useMemo(() => {
+    if (appMode !== 'scan') return null;
     const hidden = evaluatedStories.filter((item) => !item.materialized);
     if (hidden.length === 0) return null;
     hidden.sort((a, b) => a.dist - b.dist);
     return hidden[0];
-  }, [evaluatedStories]);
+  }, [appMode, evaluatedStories]);
 
-  const hasAnyMaterialized = useMemo(
-    () => evaluatedStories.some((item) => item.materialized),
-    [evaluatedStories]
-  );
+  const vipHomeStars = useMemo(() => {
+    if (appMode !== 'home') return [];
+    const vipList = stories.filter((s) => s.isVip).slice(0, 7);
+    const starCoords = [
+      { left: '16%', top: '26%' },
+      { left: '80%', top: '29%' },
+      { left: '13%', top: '54%' },
+      { left: '84%', top: '56%' },
+      { left: '26%', top: '70%' },
+      { left: '74%', top: '72%' },
+      { left: '50%', top: '23%' },
+    ];
+    return vipList.map((s, idx) => ({
+      story: s,
+      pos: starCoords[idx % starCoords.length],
+    }));
+  }, [appMode, stories]);
+
+  const spawnVipCelebration = (cx: number, cy: number) => {
+    for (let i = 0; i < 42; i++) {
+      const ang = (Math.PI * 2 * i) / 42 + (Math.random() - 0.5) * 0.25;
+      const spd = 1.8 + Math.random() * 4.4;
+      stardustRef.current.push({
+        x: cx,
+        y: cy,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd - 0.8,
+        life: 1.25,
+        r: 1.8 + Math.random() * 2.4,
+        hue: i % 4 === 0 ? 'cyan' : 'gold',
+      });
+    }
+    for (let i = 0; i < 24; i++) {
+      rosePetalsRef.current.push({
+        x: cx + (Math.random() - 0.5) * 260,
+        y: Math.max(20, cy - 180 + Math.random() * 140),
+        vx: (Math.random() - 0.5) * 1.4,
+        vy: 1.1 + Math.random() * 1.5,
+        rot: Math.random() * Math.PI * 2,
+        vr: (Math.random() - 0.5) * 0.08,
+        life: 1.0,
+        size: 5 + Math.random() * 4.5,
+      });
+    }
+  };
 
   useEffect(() => {
     if (videoRef.current) {
@@ -192,13 +308,14 @@ export const ARViewport: React.FC<ARViewportProps> = ({
     }
   }, [cameraStream]);
 
-  // Mount Three.js 3D Glowing Earth, Mystic Astrolabe, Swirling Nebula, Starfield & Orbital Rings
+  // Mount Three.js Deep Space Cosmos (Home Planets / Wormhole / Starfield)
   useEffect(() => {
     const mount = threeMountRef.current;
     if (!mount) return;
     const scene = new SecretLensScene(mount, {
       cameraActive: cameraActiveRef.current,
       cameraFacing: cameraFacingRef.current,
+      appMode: appModeRef.current,
       isRecording: isRecordingAR,
       targetYaw: targetYawRef.current,
       targetPitch: targetPitchRef.current,
@@ -227,10 +344,11 @@ export const ARViewport: React.FC<ARViewportProps> = ({
     threeSceneRef.current?.setState({
       cameraActive,
       cameraFacing,
+      appMode,
       isRecording: isRecordingAR || cleanReelMode,
       cleanReelMode,
     });
-  }, [cameraActive, cameraFacing, isRecordingAR, cleanReelMode]);
+  }, [cameraActive, cameraFacing, appMode, isRecordingAR, cleanReelMode]);
 
   // Resolve IndexedDB media blobs & preload HTMLImageElements for composite canvas recorder
   useEffect(() => {
@@ -447,14 +565,12 @@ export const ARViewport: React.FC<ARViewportProps> = ({
           if (activeRecordFilterRef.current === 'mine' && s.isDemo) continue;
           if (activeRecordFilterRef.current === 'all' && s.visibility === 'private') continue;
 
-          const relYaw = (((s.azimuth || 0) - viewYawRef.current + 540) % 360) - 180;
+          const relYaw = computeStoryRelYaw(s, viewYawRef.current, trueCompassRef.current);
           const relPitch = (s.elevation || 0) - viewPitchRef.current;
-          const yawCone = s.visualTarget ? 28 : 55;
+          const yawCone = s.visualTarget ? 32 : 55;
           if (Math.abs(relYaw) > yawCone) continue;
 
-          const levitateY = s.visualTarget
-            ? Math.sin(nowFloatT + cardIdx) * 2
-            : Math.sin(nowFloatT + cardIdx * 1.45) * 12;
+          const levitateY = Math.sin(nowFloatT + cardIdx * 1.25) * 9;
           cardIdx += 1;
 
           const cardScale = Math.max(0.72, 1 - Math.abs(relYaw) / 170);
@@ -571,15 +687,16 @@ export const ARViewport: React.FC<ARViewportProps> = ({
     };
   }, [recorderRef, onRecordTick, onRecordComplete, onToast]);
 
-  const spawnStardust = (x: number, y: number, count = 4) => {
+  const spawnStardust = (x: number, y: number, count = 4, preferCyan = false) => {
     for (let i = 0; i < count; i++) {
       stardustRef.current.push({
         x,
         y,
-        vx: (Math.random() - 0.5) * 2.4,
-        vy: (Math.random() - 0.5) * 2.4 - 0.6,
+        vx: (Math.random() - 0.5) * 2.2,
+        vy: (Math.random() - 0.5) * 2.0 - 0.55,
         life: 1,
         r: Math.random() * 2.6 + 1,
+        hue: preferCyan ? (i % 3 === 0 ? 'gold' : 'cyan') : i % 3 === 0 ? 'cyan' : 'gold',
       });
     }
   };
@@ -590,6 +707,19 @@ export const ARViewport: React.FC<ARViewportProps> = ({
       if (gyroBaseAlphaRef.current === null && e.alpha !== null) {
         gyroBaseAlphaRef.current = e.alpha;
       }
+
+      const webkitHeading = (e as unknown as { webkitCompassHeading?: number })
+        .webkitCompassHeading;
+      let trueHeading: number | null = null;
+      if (typeof webkitHeading === 'number' && Number.isFinite(webkitHeading)) {
+        trueHeading = ((webkitHeading % 360) + 360) % 360;
+      } else if (e.absolute && e.alpha !== null) {
+        trueHeading = ((360 - e.alpha) % 360 + 360) % 360;
+      }
+      if (trueHeading !== null) {
+        trueCompassRef.current = trueHeading;
+      }
+
       const dAlpha =
         e.alpha !== null && gyroBaseAlphaRef.current !== null
           ? ((e.alpha - gyroBaseAlphaRef.current + 540) % 360) - 180
@@ -601,7 +731,8 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         targetYawRef.current,
         targetPitchRef.current,
         targetRollRef.current,
-        '3D Orientation Lock'
+        trueHeading !== null ? `Compass ${Math.round(trueHeading)}° · 3D Lock` : '3D Orientation Lock',
+        trueHeading
       );
     };
 
@@ -614,6 +745,7 @@ export const ARViewport: React.FC<ARViewportProps> = ({
           const res = await DevOrient.requestPermission();
           if (res === 'granted') {
             window.addEventListener('deviceorientation', handleOrientation);
+            window.addEventListener('deviceorientationabsolute' as keyof WindowEventMap, handleOrientation as EventListener);
             return true;
           }
           return false;
@@ -629,6 +761,7 @@ export const ARViewport: React.FC<ARViewportProps> = ({
     };
     if (DevOrient && typeof DevOrient.requestPermission !== 'function') {
       window.addEventListener('deviceorientation', handleOrientation);
+      window.addEventListener('deviceorientationabsolute' as keyof WindowEventMap, handleOrientation as EventListener);
     }
 
     let isDragging = false;
@@ -694,7 +827,8 @@ export const ARViewport: React.FC<ARViewportProps> = ({
           targetYawRef.current,
           targetPitchRef.current,
           targetRollRef.current,
-          '3D Touch / Compass'
+          '3D Touch / Compass',
+          trueCompassRef.current
         );
       } else if (gyroBaseAlphaRef.current === null) {
         const nx = (e.clientX / window.innerWidth - 0.5) * 2;
@@ -705,7 +839,8 @@ export const ARViewport: React.FC<ARViewportProps> = ({
           targetYawRef.current,
           targetPitchRef.current,
           targetRollRef.current,
-          '3D Parallax / Drag'
+          '3D Parallax / Drag',
+          trueCompassRef.current
         );
       }
     };
@@ -721,6 +856,7 @@ export const ARViewport: React.FC<ARViewportProps> = ({
 
     return () => {
       window.removeEventListener('deviceorientation', handleOrientation);
+      window.removeEventListener('deviceorientationabsolute' as keyof WindowEventMap, handleOrientation as EventListener);
       vp?.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
@@ -774,8 +910,9 @@ export const ARViewport: React.FC<ARViewportProps> = ({
       const h = cyberCanvas.height;
 
       cyberCtx.clearRect(0, 0, w, h);
-      if (!cameraActive) {
-        // Deep Pitch-Black & Midnight-Blue Space Universe (#000105 to #03091e) always active when Cam OFF
+      const showSpaceBackdrop = !cameraActive || appModeRef.current === 'home';
+      if (showSpaceBackdrop) {
+        // Deep Pitch-Black & Midnight-Blue Space Universe (#000105 to #03091e) on Home Dashboard or Cam OFF
         const bg = cyberCtx.createRadialGradient(
           w * 0.48,
           h * 0.42,
@@ -813,20 +950,21 @@ export const ARViewport: React.FC<ARViewportProps> = ({
 
       // Unified Reel Mode & Video Recording Mode both render the identical dark cosmic void
       const recordingNow = isRecordingRef.current || cleanReelRef.current;
+      const inCleanPinCamera = appModeRef.current === 'pin' && cameraActive && !recordingNow;
 
-      // Deep-space atmospheric vignette & pinpoint micro-stars over BOTH Rear & Selfie cameras
-      if (cameraActive) {
+      // Deep-space atmospheric vignette & pinpoint micro-stars over Rear/Selfie Scan Camera (suppressed in Pin Mode so camera is 100% pure)
+      if (cameraActive && !showSpaceBackdrop && !inCleanPinCamera) {
         const edgeNebula = fxCtx.createRadialGradient(
           w * 0.5,
           h * 0.48,
-          Math.min(w, h) * (recordingNow ? 0.16 : 0.24),
+          Math.min(w, h) * (recordingNow ? 0.16 : 0.26),
           w * 0.5,
           h * 0.5,
           Math.max(w, h) * 0.74
         );
         edgeNebula.addColorStop(0, recordingNow ? 'rgba(3, 7, 18, 0.12)' : 'rgba(5, 10, 24, 0)');
-        edgeNebula.addColorStop(0.68, recordingNow ? 'rgba(6, 13, 34, 0.42)' : 'rgba(8, 16, 44, 0.22)');
-        edgeNebula.addColorStop(1, recordingNow ? 'rgba(2, 4, 12, 0.68)' : 'rgba(2, 5, 16, 0.48)');
+        edgeNebula.addColorStop(0.68, recordingNow ? 'rgba(6, 13, 34, 0.42)' : 'rgba(8, 16, 44, 0.18)');
+        edgeNebula.addColorStop(1, recordingNow ? 'rgba(2, 4, 12, 0.68)' : 'rgba(2, 5, 16, 0.42)');
         fxCtx.fillStyle = edgeNebula;
         fxCtx.fillRect(0, 0, w, h);
 
@@ -927,15 +1065,40 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         const p = dust[i];
         p.x += p.vx;
         p.y += p.vy;
-        p.life -= 0.032;
+        p.life -= 0.025;
         if (p.life <= 0) {
           dust.splice(i, 1);
           continue;
         }
-        fxCtx.fillStyle = `rgba(255, 245, 185, ${p.life})`;
+        fxCtx.fillStyle =
+          p.hue === 'cyan'
+            ? `rgba(88, 236, 255, ${Math.min(1, p.life) * 0.9})`
+            : `rgba(255, 240, 175, ${Math.min(1, p.life) * 0.92})`;
         fxCtx.beginPath();
-        fxCtx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+        fxCtx.arc(p.x, p.y, p.r * Math.min(1, p.life), 0, Math.PI * 2);
         fxCtx.fill();
+      }
+
+      // Rose-Petal Rain for VIP Royal Eternal Revelations
+      const petals = rosePetalsRef.current;
+      for (let i = petals.length - 1; i >= 0; i--) {
+        const pt = petals[i];
+        pt.x += pt.vx + Math.sin(ts * 0.004 + i) * 0.45;
+        pt.y += pt.vy;
+        pt.rot += pt.vr;
+        pt.life -= 0.0055;
+        if (pt.life <= 0 || pt.y > h + 30) {
+          petals.splice(i, 1);
+          continue;
+        }
+        fxCtx.save();
+        fxCtx.translate(pt.x, pt.y);
+        fxCtx.rotate(pt.rot);
+        fxCtx.fillStyle = i % 3 === 0 ? `rgba(255, 198, 128, ${pt.life * 0.88})` : `rgba(255, 92, 138, ${pt.life * 0.88})`;
+        fxCtx.beginPath();
+        fxCtx.ellipse(0, 0, pt.size, pt.size * 0.56, 0, 0, Math.PI * 2);
+        fxCtx.fill();
+        fxCtx.restore();
       }
 
       viewYawRef.current += (targetYawRef.current - viewYawRef.current) * 0.22;
@@ -946,84 +1109,135 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         lastYawSyncTick = ts;
         setLiveYaw(viewYawRef.current);
         setLivePitch(viewPitchRef.current);
+        if (trueCompassRef.current !== null) {
+          setLiveCompass(trueCompassRef.current);
+        }
       }
 
-      // 10 Hz Live Camera Pixel/Histogram Visual Target Matcher for Leaf/Wall Lock
+      // 8-10 Hz Live Wall Ghost Outline in Pin Mode OR Akhand Visual Wall Matcher in Scan Mode
       if (cameraActive && videoRef.current && ts - lastVisualCheckTick > 105) {
         lastVisualCheckTick = ts;
         const vid = videoRef.current;
         const mirrorX = cameraFacingRef.current === 'user';
-        let changed = false;
-        const nextFlags = { ...visualMatchFlagsRef.current };
 
-        for (const item of evaluatedRef.current) {
-          const s = item.story;
-          if (!s.visualTarget) continue;
-          if (item.dist > 3.0) continue;
-
-          const relYaw = (((s.azimuth || 0) - viewYawRef.current + 540) % 360) - 180;
-          const relPitch = (s.elevation || 0) - viewPitchRef.current;
-          if (Math.abs(relYaw) > 28 || Math.abs(relPitch) > 28) {
-            if (nextFlags[s.id] !== false) {
-              nextFlags[s.id] = false;
-              changed = true;
-            }
-            continue;
-          }
-
-          const normX = Math.max(0.08, Math.min(0.92, 0.5 + (relYaw / 26) * 0.48));
-          const normY = Math.max(0.08, Math.min(0.92, 0.5 - (relPitch / 30) * 0.44));
-          const score = matchVisualTargetAt(vid, s.visualTarget, normX, normY, mirrorX);
-          const matched = score >= 0.40;
-          if (nextFlags[s.id] !== matched) {
-            nextFlags[s.id] = matched;
-            changed = true;
-          }
+        if (appModeRef.current === 'pin' && pinGhostCanvasRef.current) {
+          renderCenterGhostOutline(vid, pinGhostCanvasRef.current, mirrorX);
         }
 
-        if (changed) {
-          visualMatchFlagsRef.current = nextFlags;
-          setVisualMatchFlags(nextFlags);
+        if (appModeRef.current === 'scan') {
+          let changed = false;
+          const nextFlags = { ...visualMatchFlagsRef.current };
+          const nextScores = { ...visualMatchScoresRef.current };
+
+          for (const item of evaluatedRef.current) {
+            const s = item.story;
+            if (!s.visualTarget) continue;
+            if (!item.inRange) {
+              if (s.id in nextFlags) {
+                delete nextFlags[s.id];
+                delete nextScores[s.id];
+                changed = true;
+              }
+              continue;
+            }
+
+            const relYaw = computeStoryRelYaw(s, viewYawRef.current, trueCompassRef.current);
+            const relPitch = (s.elevation || 0) - viewPitchRef.current;
+            if (Math.abs(relYaw) > 24 || Math.abs(relPitch) > 24) {
+              if (nextFlags[s.id] !== false) {
+                nextFlags[s.id] = false;
+                nextScores[s.id] = 0;
+                changed = true;
+              }
+              continue;
+            }
+
+            const normX = Math.max(0.08, Math.min(0.92, 0.5 + (relYaw / 24) * 0.46));
+            const normY = Math.max(0.08, Math.min(0.92, 0.5 - (relPitch / 24) * 0.44));
+            const score = matchVisualTargetAt(vid, s.visualTarget, normX, normY, mirrorX);
+            const matched = score >= 0.25;
+            if (nextFlags[s.id] !== matched || Math.abs((nextScores[s.id] || 0) - score) > 0.05) {
+              nextFlags[s.id] = matched;
+              nextScores[s.id] = score;
+              changed = true;
+            }
+          }
+
+          if (changed) {
+            visualMatchFlagsRef.current = nextFlags;
+            visualMatchScoresRef.current = nextScores;
+            setVisualMatchFlags(nextFlags);
+            setVisualMatchScores(nextScores);
+          }
         }
       }
 
-      let nearest: { story: ARStory; dist: number; relYaw: number; inRange: boolean } | null = null;
+      let nearest: {
+        story: ARStory;
+        dist: number;
+        relYaw: number;
+        inRange: boolean;
+        wallAlignmentPct: number;
+        targetLocked: boolean;
+      } | null = null;
       let activeCenterItem: { story: ARStory; relYaw: number } | null = null;
 
       let bobIdx = 0;
       for (const item of evaluatedRef.current) {
-        const { story, dist, materialized } = item;
-        const relYaw = (((story.azimuth || 0) - viewYawRef.current + 540) % 360) - 180;
+        const { story, dist, materialized, wallAlignmentPct } = item;
+        const relYaw = computeStoryRelYaw(story, viewYawRef.current, trueCompassRef.current);
         const relPitch = (story.elevation || 0) - viewPitchRef.current;
         const relRoll = (story.rollGamma || 0) - viewRollRef.current;
         const absYaw = Math.abs(relYaw);
 
         if (!nearest || dist < nearest.dist || (dist === nearest.dist && absYaw < Math.abs(nearest.relYaw))) {
-          nearest = { story, dist, relYaw, inRange: dist <= 3.0 };
+          nearest = {
+            story,
+            dist,
+            relYaw,
+            inRange: item.inRange,
+            wallAlignmentPct,
+            targetLocked: materialized,
+          };
         }
 
-        if (!materialized) continue;
+        if (!materialized) {
+          celebratedVipIdsRef.current.delete(story.id);
+          continue;
+        }
         const el = bubbleRefs.current.get(story.id);
         if (!el) continue;
 
-        // Visual-locked items stay physically glued to the exact leaf/spot; demos gently float
-        const levitateY = story.visualTarget
-          ? Math.sin(ts * 0.002 + bobIdx) * 2.2
-          : Math.sin(ts * 0.0022 + bobIdx * 1.45) * 11;
+        // Smooth magical mid-air floating levitation for both spot-locked and sky messages
+        const levitateY = Math.sin(ts * 0.0024 + bobIdx * 1.3) * 8.5;
         bobIdx += 1;
 
-        const yawDiv = story.visualTarget ? 26 : 46;
+        const yawDiv = story.visualTarget ? 28 : 46;
         const pitchDiv = story.visualTarget ? 30 : 28;
         const xPx = (relYaw / yawDiv) * (w * 0.48);
         const yPx = -(relPitch / pitchDiv) * (h * 0.44) + levitateY;
         const depthZ = Math.max(-220, 40 - absYaw * 3.2);
         const scale = Math.max(0.76, 1 - absYaw / 170);
-        const opacity = absYaw > (story.visualTarget ? 28 : 55) ? 0 : Math.max(0.25, 1 - absYaw / 62);
+        const opacity = absYaw > (story.visualTarget ? 32 : 55) ? 0 : Math.max(0.32, 1 - absYaw / 62);
 
         el.style.opacity = opacity.toFixed(2);
         el.style.pointerEvents = opacity < 0.2 ? 'none' : 'auto';
         el.style.zIndex = String(Math.round(200 - absYaw));
         el.style.transform = `translate3d(calc(-50% + ${xPx.toFixed(1)}px), calc(-50% + ${yPx.toFixed(1)}px), ${depthZ.toFixed(1)}px) rotateZ(${(relRoll * 0.28).toFixed(1)}deg) rotateY(${(-relYaw * 0.22).toFixed(1)}deg) rotateX(${(relPitch * 0.18).toFixed(1)}deg) scale(${scale.toFixed(3)})`;
+
+        // VIP Rose-Petal Rain + Golden Fireworks Explosion + Soft Divine Temple-Chime Shimmer on reveal
+        if (story.isVip && opacity > 0.45 && !celebratedVipIdsRef.current.has(story.id)) {
+          celebratedVipIdsRef.current.add(story.id);
+          spawnVipCelebration(w * 0.5 + xPx, h * 0.5 + yPx);
+          playDivineTempleChime();
+        }
+
+        // Emit subtle glowing cyan & gold stardust trail particles around each floating AR message
+        if (Math.random() < 0.48 && stardustRef.current.length < 180) {
+          const sx = w * 0.5 + xPx + (Math.random() - 0.5) * 165;
+          const sy = h * 0.5 + yPx + (Math.random() - 0.5) * 145;
+          spawnStardust(sx, sy, 1, Math.random() > 0.45);
+        }
 
         if (absYaw < 14 && Math.abs(relPitch) < 18) {
           activeCenterItem = { story, relYaw };
@@ -1037,11 +1251,11 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         heatLevel: nearest ? Math.max(0.15, Math.min(1, 1 - nearest.dist / 16)) : 0.25,
       });
 
-      if (activeCenterItem && activeCenterItem.story.id !== lastCenteredId) {
+      if (appModeRef.current === 'scan' && activeCenterItem && activeCenterItem.story.id !== lastCenteredId) {
         lastCenteredId = activeCenterItem.story.id;
         setCenteredId(activeCenterItem.story.id);
         onCenteredCard(activeCenterItem.story, activeCenterItem.relYaw);
-      } else if (!activeCenterItem && lastCenteredId !== null) {
+      } else if ((!activeCenterItem || appModeRef.current !== 'scan') && lastCenteredId !== null) {
         lastCenteredId = null;
         setCenteredId(null);
       }
@@ -1067,6 +1281,8 @@ export const ARViewport: React.FC<ARViewportProps> = ({
             relYaw: nearest.relYaw,
             inPortalRange: nearest.inRange,
             heatLevel,
+            wallAlignmentPct: nearest.wallAlignmentPct,
+            targetLocked: nearest.targetLocked,
           });
         } else {
           onRadarUpdate(null);
@@ -1098,8 +1314,8 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         autoPlay
         playsInline
         muted
-        className={`absolute inset-0 w-full h-full object-cover z-[1] transition-opacity duration-700 ${
-          cameraActive ? 'opacity-100' : 'opacity-0'
+        className={`absolute inset-0 w-full h-full object-cover z-[1] transition-opacity duration-500 ${
+          cameraActive && appMode !== 'home' ? 'opacity-100' : 'opacity-0'
         }`}
         style={{
           transform: cameraFacing === 'user' ? 'scaleX(-1)' : 'none',
@@ -1112,44 +1328,78 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         aria-hidden="true"
       />
 
-      <div
-        className="absolute inset-0 z-[3] pointer-events-none"
-        style={{
-          background:
-            'radial-gradient(circle at center, transparent 48%, rgba(2, 5, 14, 0.65) 100%), linear-gradient(to bottom, rgba(4, 6, 13, 0.72) 0%, transparent 20%, transparent 78%, rgba(4, 6, 13, 0.84) 100%)',
-        }}
-      />
-
-      <div
-        className={`absolute inset-3.5 z-[4] pointer-events-none border border-[#f5c542]/12 rounded-2xl transition-opacity duration-300 ${
-          cleanReelMode || isRecordingAR ? 'opacity-0' : 'opacity-100'
-        }`}
-      >
-        <span className="absolute -top-px -left-px w-6 h-6 border-t-2 border-l-2 border-[#f5c542]/65 rounded-tl-xl" />
-        <span className="absolute -bottom-px -right-px w-6 h-6 border-b-2 border-r-2 border-[#f5c542]/65 rounded-br-xl" />
-      </div>
-
-      {/* Sleek Ultra-Thin Golden Target Reticle (+) for Pinpoint Leaf / Object Aiming */}
-      {!cleanReelMode && !isRecordingAR && (
+      {appMode !== 'pin' && (
         <div
-          className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[12] pointer-events-none flex flex-col items-center justify-center"
+          className="absolute inset-0 z-[3] pointer-events-none"
+          style={{
+            background:
+              'radial-gradient(circle at center, transparent 48%, rgba(2, 5, 14, 0.65) 100%), linear-gradient(to bottom, rgba(4, 6, 13, 0.72) 0%, transparent 20%, transparent 78%, rgba(4, 6, 13, 0.84) 100%)',
+          }}
+        />
+      )}
+
+      {/* Sleek Minimal Glowing Golden Center Dot + Live Wall Ghost Edge Outline in Pin Mode */}
+      {appMode === 'pin' && !cleanReelMode && !isRecordingAR && (
+        <div
+          className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[12] pointer-events-none flex items-center justify-center"
           aria-hidden="true"
         >
-          <div className="relative w-12 h-12 flex items-center justify-center">
-            <span className="absolute top-0 left-0 w-2.5 h-2.5 border-t border-l border-[#f5c542]/75" />
-            <span className="absolute top-0 right-0 w-2.5 h-2.5 border-t border-r border-[#f5c542]/75" />
-            <span className="absolute bottom-0 left-0 w-2.5 h-2.5 border-b border-l border-[#f5c542]/75" />
-            <span className="absolute bottom-0 right-0 w-2.5 h-2.5 border-b border-r border-[#f5c542]/75" />
-            <span className="absolute left-2 right-2 h-px bg-[#f5c542]/80 shadow-[0_0_6px_rgba(245,197,66,0.9)]" />
-            <span className="absolute top-2 bottom-2 w-px bg-[#f5c542]/80 shadow-[0_0_6px_rgba(245,197,66,0.9)]" />
-            <span className="w-1.5 h-1.5 rounded-full bg-[#fff4b8] shadow-[0_0_8px_#f5c542]" />
-          </div>
+          {cameraActive && (
+            <canvas
+              ref={pinGhostCanvasRef}
+              width={64}
+              height={64}
+              className="w-36 h-36 rounded-full opacity-75"
+            />
+          )}
+          <span className="absolute w-2.5 h-2.5 rounded-full bg-[#fff6c4] ring-4 ring-[#f5c542]/28 shadow-[0_0_12px_#f5c542,0_0_24px_rgba(245,197,66,0.9)]" />
         </div>
       )}
 
-      {!cleanReelMode && !isRecordingAR && nearestHiddenPortal && (
+      {/* Akhand Stored Wall Ghost Outline Overlay inside 3m Scan Mode when aligning */}
+      {appMode === 'scan' &&
+        !cleanReelMode &&
+        !isRecordingAR &&
+        nearestHiddenPortal?.inRange &&
+        nearestHiddenPortal.story.visualTarget?.ghostOutlineDataUrl && (
+          <img
+            src={nearestHiddenPortal.story.visualTarget.ghostOutlineDataUrl}
+            alt=""
+            aria-hidden="true"
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-36 h-36 rounded-full opacity-35 pointer-events-none z-[11]"
+          />
+        )}
+
+      {/* Interactive Named Golden Stars in Cosmic Home Dashboard Sky (VIP Royal Eternal) */}
+      {appMode === 'home' && !cleanReelMode && !isRecordingAR && (
+        <div className="absolute inset-0 z-[10] pointer-events-none">
+          {vipHomeStars.map(({ story: vs, pos }) => {
+            const starLabel = vs.isAnonymous ? '🎭 Mysterious Soul' : vs.author;
+            return (
+              <button
+                key={`vip_star_${vs.id}`}
+                type="button"
+                onClick={() => onSelectCard(vs)}
+                style={{ left: pos.left, top: pos.top }}
+                className="pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 group flex flex-col items-center gap-1 cursor-pointer"
+                title={`${starLabel}: ${vs.headline}`}
+              >
+                <span className="w-6 h-6 rounded-full bg-gradient-to-br from-[#fff9cc] via-[#f5c542] to-[#d98c14] flex items-center justify-center shadow-[0_0_18px_#f5c542,0_0_32px_rgba(255,244,184,0.8)] group-hover:scale-125 transition-transform">
+                  <Star className="w-3.5 h-3.5 text-[#2b1a00] fill-[#2b1a00]" />
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-[#060d20]/88 border border-[#f5c542]/65 text-[10px] font-extrabold text-[#fff4b8] whitespace-nowrap shadow-md max-w-[110px] truncate">
+                  ⭐ {starLabel}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Scan & Reveal Sleek Distance / Akhand Triple-Lock Alignment Pill */}
+      {appMode === 'scan' && !cleanReelMode && !isRecordingAR && nearestHiddenPortal && (
         <div
-          className={`fixed left-1/2 -translate-x-1/2 z-[18] pointer-events-none px-4 py-2 rounded-full border text-center transition-all duration-300 top-[154px] sm:top-[138px] max-w-[92vw] ${
+          className={`fixed left-1/2 -translate-x-1/2 z-[18] pointer-events-none px-4 py-2 rounded-full border text-center transition-all duration-300 top-[116px] sm:top-[110px] max-w-[92vw] ${
             nearestHiddenPortal.inRange
               ? 'border-[#38e8ff]/75 bg-[#04112b]/92 shadow-[0_0_24px_rgba(56,232,255,0.38)]'
               : 'border-[#f5c542]/75 bg-[#050c22]/94 shadow-[0_0_26px_rgba(245,197,66,0.42)]'
@@ -1159,8 +1409,10 @@ export const ARViewport: React.FC<ARViewportProps> = ({
             <Sparkles className="w-4 h-4 text-[#f5c542] shrink-0" />
             <span>
               {nearestHiddenPortal.inRange
-                ? `${dict.turnToAlign} (${nearestHiddenPortal.relYaw > 0 ? '➡️ Turn Right' : '⬅️ Turn Left'})`
-                : `${dict.secretDetectedPrefix} ${Math.max(4, Math.round(nearestHiddenPortal.dist))}m Away — ${dict.walkWithin3mSuffix}`}
+                ? `${dict.pointAtWallAlign} (${nearestHiddenPortal.wallAlignmentPct}% · ${
+                    nearestHiddenPortal.relYaw > 0 ? '➡️ Right' : '⬅️ Left'
+                  })`
+                : `${dict.hiddenSecretPrefix} ${Math.max(4, Math.round(nearestHiddenPortal.dist))}m ${dict.walkToWallSuffix}`}
             </span>
           </div>
         </div>
@@ -1170,22 +1422,27 @@ export const ARViewport: React.FC<ARViewportProps> = ({
         className="absolute inset-0 z-[5] pointer-events-none"
         style={{ transformStyle: 'preserve-3d' }}
       >
-        {materializedItems.map(({ story: s }) => {
+        {materializedItems.map(({ story: s, visualLocked }) => {
           const isPrivateLocked = s.visibility === 'private';
           const isCapsuleLocked = Boolean(s.unlockAt && nowMs < s.unlockAt);
           const isBlurred = isPrivateLocked || isCapsuleLocked;
           const mediaSrc = resolvedMedia[s.id] || s.mediaData;
           const hasAudio = Boolean(s.audioData || s.audioIdbKey);
           const isCentered = centeredId === s.id;
-          const hasGoldenAura = !s.isDemo && (s.hasGoldenAura || streakDays >= 3);
+          const isVipCard = Boolean(s.isVip);
+          const hasGoldenAura = isVipCard || (!s.isDemo && (s.hasGoldenAura || streakDays >= 3));
+          const displayAuthor = s.isAnonymous ? '🎭 Mysterious Soul' : s.author;
           const replyCount = s.replies?.length || 0;
 
           return (
             <div
               key={s.id}
               ref={(el) => {
-                if (el) bubbleRefs.current.set(s.id, el);
-                else bubbleRefs.current.delete(s.id);
+                if (el) {
+                  bubbleRefs.current.set(s.id, el);
+                } else {
+                  bubbleRefs.current.delete(s.id);
+                }
               }}
               onClick={() => onSelectCard(s)}
               role="button"
@@ -1193,69 +1450,96 @@ export const ARViewport: React.FC<ARViewportProps> = ({
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') onSelectCard(s);
               }}
-              className={`ar-bubble-card animate-portal-open animate-float-bob absolute left-1/2 top-1/2 w-[224px] sm:w-[242px] pointer-events-auto cursor-pointer rounded-2xl p-2.5 text-[#f4f7ff] transition-[border-color,box-shadow] duration-200 ${
-                hasGoldenAura
-                  ? 'border-2 border-[#fff1a8] ring-2 ring-[#f5c542]/55 shadow-[0_18px_48px_rgba(0,0,0,0.84),0_0_38px_rgba(245,197,66,0.75),inset_0_0_14px_rgba(245,197,66,0.22)]'
-                  : isCentered
-                    ? 'border-[1.5px] border-[#fff0a8] shadow-[0_18px_46px_rgba(0,0,0,0.78),0_0_32px_rgba(245,197,66,0.52)]'
-                    : 'border-[1.5px] border-[#f5c542]/50 shadow-[0_14px_40px_rgba(0,0,0,0.68),0_0_24px_rgba(245,197,66,0.22)]'
+              className={`ar-bubble-card animate-portal-open animate-float-bob absolute left-1/2 top-1/2 w-[220px] sm:w-[248px] max-w-[84vw] pointer-events-auto cursor-pointer rounded-2xl p-2.5 text-[#f4f7ff] transition-[border-color,box-shadow] duration-200 ${
+                isVipCard
+                  ? 'border-2 border-[#fff6c4] ring-2 ring-[#f5c542]/80 shadow-[0_20px_54px_rgba(0,0,0,0.88),0_0_46px_rgba(245,197,66,0.85),inset_0_0_18px_rgba(255,244,184,0.28)]'
+                  : hasGoldenAura
+                    ? 'border-2 border-[#fff1a8] ring-2 ring-[#f5c542]/55 shadow-[0_18px_48px_rgba(0,0,0,0.84),0_0_38px_rgba(245,197,66,0.75),inset_0_0_14px_rgba(245,197,66,0.22)]'
+                    : visualLocked || isCentered
+                      ? 'border-[1.5px] border-[#fff0a8] shadow-[0_18px_46px_rgba(0,0,0,0.78),0_0_32px_rgba(245,197,66,0.52)]'
+                      : 'border-[1.5px] border-[#f5c542]/50 shadow-[0_14px_40px_rgba(0,0,0,0.68),0_0_24px_rgba(245,197,66,0.22)]'
               }`}
               style={{
-                background: s.isWish
-                  ? 'linear-gradient(155deg, rgba(20, 32, 74, 0.94) 0%, rgba(6, 12, 32, 0.96) 100%)'
-                  : 'linear-gradient(155deg, rgba(11, 22, 52, 0.92) 0%, rgba(4, 8, 20, 0.96) 100%)',
+                background: isVipCard
+                  ? 'linear-gradient(155deg, rgba(46, 32, 6, 0.95) 0%, rgba(16, 22, 54, 0.96) 52%, rgba(8, 10, 24, 0.98) 100%)'
+                  : s.isWish
+                    ? 'linear-gradient(155deg, rgba(20, 32, 74, 0.94) 0%, rgba(6, 12, 32, 0.96) 100%)'
+                    : 'linear-gradient(155deg, rgba(11, 22, 52, 0.92) 0%, rgba(4, 8, 20, 0.96) 100%)',
                 transformOrigin: 'center center',
                 willChange: 'transform, opacity',
               }}
             >
+              {/* VIP 3D Diamond-Gold Temple Crown Crest */}
+              {isVipCard && (
+                <div className="flex items-center justify-center gap-1.5 mb-1.5 pb-1 border-b border-[#f5c542]/45 text-[10px] font-extrabold text-[#fff4b8] tracking-wider">
+                  <Crown className="w-3.5 h-3.5 text-[#f5c542]" />
+                  <span>💎 ROYAL TEMPLE PORTAL · 100Y</span>
+                </div>
+              )}
+
               <div className="flex items-center justify-between gap-1.5 mb-1.5 text-[11px]">
                 <span className="font-bold text-[#fff0a8] truncate max-w-[130px]">
                   {hasGoldenAura ? `👑 ${s.rankBadge || 'Explorer'}` : s.rankBadge || '🌱 Explorer'}
                 </span>
                 <span className="font-hud text-[10px] text-[#34f5a8] tabular-nums shrink-0">
-                  {s.visualTarget ? `🎯 ${s.distanceMeters.toFixed(1)}m` : `${s.distanceMeters.toFixed(1)}m · 3M`}
+                  {visualLocked
+                    ? `🎯 100% LOCKED`
+                    : s.visualTarget
+                      ? `🎯 ${s.distanceMeters.toFixed(1)}m`
+                      : `${s.distanceMeters.toFixed(1)}m · 3M`}
                 </span>
               </div>
 
               <div className="relative w-full h-28 rounded-xl overflow-hidden bg-[radial-gradient(circle_at_center,#132856_0%,#060b18_100%)] border border-[#f5c542]/25 mb-2 flex items-center justify-center">
-                {mediaSrc && s.mediaType === 'video' ? (
-                  <video
-                    src={mediaSrc}
-                    autoPlay
-                    loop
-                    muted
-                    playsInline
-                    className={`w-full h-full object-cover ${
-                      isBlurred ? 'blur-md brightness-50 scale-110' : ''
-                    }`}
-                  />
-                ) : mediaSrc ? (
-                  <img
-                    src={mediaSrc}
-                    alt={s.headline}
-                    referrerPolicy="no-referrer"
-                    className={`w-full h-full object-cover ${
-                      isBlurred ? 'blur-md brightness-50 scale-110' : ''
-                    }`}
-                  />
-                ) : s.drawingData ? null : (
-                  <p
-                    className={`px-3 text-xs text-[#d7e3ff] text-center line-clamp-3 ${
-                      isBlurred ? 'blur-md brightness-50' : ''
-                    }`}
-                  >
-                    {s.story.slice(0, 80)}...
-                  </p>
-                )}
+                {s.isGiftBox ? (
+                  <div className="w-full h-full flex flex-col items-center justify-center gap-1.5 bg-gradient-to-br from-[#3b2905]/95 to-[#161003]/95 p-2 text-center">
+                    <Gift className="w-8 h-8 text-[#fff4b8] drop-shadow-[0_0_12px_rgba(245,197,66,0.95)]" />
+                    <span className="font-hud text-[10px] tracking-wider text-[#fff4b8] bg-black/65 border border-[#f5c542] px-2.5 py-0.5 rounded-full">
+                      🎁 TAP TO UNWRAP GIFT
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    {mediaSrc && s.mediaType === 'video' ? (
+                      <video
+                        src={mediaSrc}
+                        autoPlay
+                        loop
+                        muted
+                        playsInline
+                        className={`w-full h-full object-cover ${
+                          isBlurred ? 'blur-md brightness-50 scale-110' : ''
+                        }`}
+                      />
+                    ) : mediaSrc ? (
+                      <img
+                        src={mediaSrc}
+                        alt={s.headline}
+                        referrerPolicy="no-referrer"
+                        className={`w-full h-full object-cover ${
+                          isBlurred ? 'blur-md brightness-50 scale-110' : ''
+                        }`}
+                      />
+                    ) : s.drawingData ? null : (
+                      <p
+                        className={`px-3 text-xs text-[#d7e3ff] text-center line-clamp-3 ${
+                          isBlurred ? 'blur-md brightness-50' : ''
+                        }`}
+                      >
+                        {s.story.slice(0, 80)}...
+                      </p>
+                    )}
 
-                {s.drawingData && (
-                  <img
-                    src={s.drawingData}
-                    alt="Neon Air Drawing"
-                    className={`absolute inset-0 w-full h-full object-contain pointer-events-none drop-shadow-[0_0_12px_rgba(245,197,66,0.9)] ${
-                      isBlurred ? 'blur-md brightness-50' : ''
-                    }`}
-                  />
+                    {s.drawingData && (
+                      <img
+                        src={s.drawingData}
+                        alt="Neon Air Drawing"
+                        className={`absolute inset-0 w-full h-full object-contain pointer-events-none drop-shadow-[0_0_12px_rgba(245,197,66,0.9)] ${
+                          isBlurred ? 'blur-md brightness-50' : ''
+                        }`}
+                      />
+                    )}
+                  </>
                 )}
 
                 {isPrivateLocked && (
@@ -1276,7 +1560,7 @@ export const ARViewport: React.FC<ARViewportProps> = ({
                   </div>
                 )}
 
-                {hasAudio && !isBlurred && (
+                {hasAudio && !isBlurred && !s.isGiftBox && (
                   <span className="absolute bottom-1.5 right-1.5 inline-flex items-center gap-1 bg-[#040814]/85 border border-[#f5c542] text-[#fff0a8] rounded-md text-[10px] font-semibold px-1.5 py-0.5">
                     <Mic className="w-3 h-3 text-[#f5c542]" />
                     Spirit Echo
@@ -1289,7 +1573,7 @@ export const ARViewport: React.FC<ARViewportProps> = ({
               </h3>
 
               <div className="flex items-center justify-between text-[11px] text-[#9eb0d6]">
-                <span className="truncate max-w-[105px]">{s.author}</span>
+                <span className="truncate max-w-[105px]">{displayAuthor}</span>
                 <div className="flex items-center gap-2 shrink-0">
                   {replyCount > 0 && (
                     <span className="inline-flex items-center gap-0.5 text-[#38e8ff] font-bold tabular-nums">

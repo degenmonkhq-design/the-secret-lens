@@ -289,20 +289,35 @@ export function buildCosmicPlanetsAndThoughts(
 
   const animate = (elapsed: number) => {
     if (planetsGroup.visible) {
-      earth.surfaceMesh.rotation.y = elapsed * 0.065;
-      earth.cloudsMesh.rotation.y = elapsed * 0.092;
+      const earthX = -0.34 + Math.sin(elapsed * 0.16) * 0.42;
+      const earthY = -0.14 + Math.cos(elapsed * 0.13) * 0.22;
+      const earthZ = -3.05 + Math.sin(elapsed * 0.11) * 0.24;
+      earth.group.position.set(earthX, earthY, earthZ);
+      earth.surfaceMesh.rotation.y = elapsed * 0.075;
+      earth.cloudsMesh.rotation.y = elapsed * 0.105;
 
-      saturnBody.rotation.y = elapsed * 0.05;
-      saturnRingMesh.rotation.z = elapsed * 0.018;
+      const saturnX = 2.05 + Math.cos(elapsed * 0.12) * 0.48;
+      const saturnY = 1.12 + Math.sin(elapsed * 0.15) * 0.24;
+      const saturnZ = -5.15 + Math.sin(elapsed * 0.09) * 0.35;
+      saturnGroup.position.set(saturnX, saturnY, saturnZ);
+      saturnBody.rotation.y = elapsed * 0.055;
+      saturnRingMesh.rotation.z = elapsed * 0.022;
 
-      lunarMoon.rotation.y = elapsed * 0.035;
-      lunarMoon.position.y = 1.42 + Math.sin(elapsed * 0.42) * 0.04;
+      const moonOrbitA = elapsed * 0.22;
+      lunarMoon.position.set(
+        -1.95 + Math.cos(moonOrbitA) * 0.45,
+        1.32 + Math.sin(moonOrbitA * 0.85) * 0.22,
+        -4.45 + Math.sin(moonOrbitA) * 0.35
+      );
+      lunarMoon.rotation.y = elapsed * 0.04;
 
-      titanMoon.position.x = 2.15 + Math.cos(elapsed * 0.18) * 1.45;
-      titanMoon.position.z = -5.25 + Math.sin(elapsed * 0.18) * 1.15;
+      titanMoon.position.x = saturnX + Math.cos(elapsed * 0.22) * 1.45;
+      titanMoon.position.y = saturnY + Math.sin(elapsed * 0.19) * 0.28;
+      titanMoon.position.z = saturnZ + Math.sin(elapsed * 0.22) * 1.15;
     }
 
     if (orbitingThoughtsGroup.visible) {
+      orbitingThoughtsGroup.position.copy(earth.group.position);
       ribbonA.rotation.y = elapsed * 0.13;
       ribbonB.rotation.y = -elapsed * 0.095;
       for (const item of thoughtOrbs) {

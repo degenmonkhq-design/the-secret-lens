@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Sparkles, X } from 'lucide-react';
 import { ARStory, Language, VisualTargetSignature } from '../types/story';
 import { I18N } from '../utils/i18n';
-import { getInvitesCount } from '../utils/mediaStorage';
+import { HUNDRED_YEARS_MS, getInvitesCount } from '../utils/mediaStorage';
 import { containsAbuseOrSpam, getRankBadge } from '../utils/safety';
 
 interface SecretWishModalProps {
@@ -11,6 +11,7 @@ interface SecretWishModalProps {
   viewYaw: number;
   viewPitch: number;
   viewRoll: number;
+  trueCompassHeading: number | null;
   targetSnapshot: VisualTargetSignature | null;
   userLat: number;
   userLng: number;
@@ -26,6 +27,7 @@ export const SecretWishModal: React.FC<SecretWishModalProps> = ({
   viewYaw,
   viewPitch,
   viewRoll,
+  trueCompassHeading,
   targetSnapshot,
   userLat,
   userLng,
@@ -57,7 +59,10 @@ export const SecretWishModal: React.FC<SecretWishModalProps> = ({
     }
 
     const invites = getInvitesCount();
-    const normalizedHeading = ((Math.round(viewYaw) % 360) + 360) % 360;
+    const normalizedHeading =
+      trueCompassHeading !== null
+        ? ((Math.round(trueCompassHeading) % 360) + 360) % 360
+        : ((Math.round(viewYaw) % 360) + 360) % 360;
     const wishStory: ARStory = {
       id: `wish_${Date.now()}`,
       isDemo: false,
@@ -77,6 +82,7 @@ export const SecretWishModal: React.FC<SecretWishModalProps> = ({
       audioData: null,
       azimuth: Math.round(viewYaw),
       compassHeading: normalizedHeading,
+      hasTrueCompass: trueCompassHeading !== null,
       elevation: Math.round(viewPitch),
       rollGamma: Math.round(viewRoll),
       distanceMeters: 0,
@@ -85,6 +91,7 @@ export const SecretWishModal: React.FC<SecretWishModalProps> = ({
       views: 1,
       reactions: { heart: 1, blessing: 1, mindblown: 0 },
       createdAt: Date.now(),
+      expiresAt: Date.now() + HUNDRED_YEARS_MS,
       replies: [],
       visualTarget: targetSnapshot || null,
     };

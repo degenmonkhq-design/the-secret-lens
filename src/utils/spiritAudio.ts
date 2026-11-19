@@ -80,3 +80,71 @@ export function attachSpiritEcho(audioEl: HTMLAudioElement, pan = 0): void {
     // Graceful fallback: HTMLAudioElement plays normally without DSP graph
   }
 }
+
+let templeChimeCtx: AudioContext | null = null;
+let lastChimeTime = 0;
+
+/**
+ * Soft, serene harmonic temple-bell & celestial shimmer triggered ONLY
+ * when a VIP Royal Eternal memory reveals (never attached to button clicks).
+ */
+export function playDivineTempleChime(): void {
+  const nowMs = Date.now();
+  if (nowMs - lastChimeTime < 2200) return;
+  lastChimeTime = nowMs;
+
+  try {
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+
+    if (!templeChimeCtx) {
+      templeChimeCtx = new AudioCtx();
+    }
+    const ctx = templeChimeCtx;
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+
+    const master = ctx.createGain();
+    master.gain.value = 0.085;
+    master.connect(ctx.destination);
+
+    // Sacred warm overtones (C5 -> E5 -> G5 -> B5 -> C6)
+    const freqs = [523.25, 659.25, 783.99, 987.77, 1046.5];
+    const now = ctx.currentTime;
+
+    freqs.forEach((f, idx) => {
+      const start = now + idx * 0.14;
+      const osc = ctx.createOscillator();
+      const oscOver = ctx.createOscillator();
+      osc.type = 'sine';
+      oscOver.type = 'sine';
+      osc.frequency.value = f;
+      oscOver.frequency.value = f * 2.003;
+
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(0.28 / (1 + idx * 0.18), start + 0.045);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + 2.7);
+
+      const gOver = ctx.createGain();
+      gOver.gain.setValueAtTime(0.0001, start);
+      gOver.gain.exponentialRampToValueAtTime(0.06, start + 0.03);
+      gOver.gain.exponentialRampToValueAtTime(0.0001, start + 1.3);
+
+      osc.connect(g);
+      oscOver.connect(gOver);
+      g.connect(master);
+      gOver.connect(master);
+
+      osc.start(start);
+      oscOver.start(start);
+      osc.stop(start + 2.8);
+      oscOver.stop(start + 1.5);
+    });
+  } catch {
+    // Graceful no-op if audio is blocked
+  }
+}
