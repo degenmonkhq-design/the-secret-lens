@@ -1,0 +1,6 @@
+{
+  "name": "THE SECRET LENS",
+  "description": "100% Free, Zero-Ads Cinema-Grade Augmented Reality Mobile Web App (दुनिया की बोलती हुई किताब) with 3D Gyroscope AR, Multimedia Bubbles, Voice Whispers, and Viral 9:16 Reel Cards.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

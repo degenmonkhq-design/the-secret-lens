@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 35%, #0c1b3e 0%, #050914 55%, #020307 100%);
+    color: #f4f7ff;
+    font-family: 'Plus Jakarta Sans', 'Noto Sans Devanagari', system-ui, -apple-system, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .font-hud {
+    font-family: 'Orbitron', 'Noto Sans Devanagari', sans-serif;
+  }
+}
+
+@keyframes laserSweep {
+  0% {
+    top: 8%;
+    opacity: 0.25;
+  }
+  50% {
+    top: 88%;
+    opacity: 1;
+  }
+  100% {
+    top: 8%;
+    opacity: 0.25;
+  }
+}
+
+@keyframes radarSweep {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes spinSlow {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+@keyframes floatBob {
+  0%,
+  100% {
+    margin-top: 0px;
+  }
+  50% {
+    margin-top: -8px;
+  }
+}
+
+@keyframes pulseGold {
+  0%,
+  100% {
+    box-shadow: 0 8px 26px rgba(245, 197, 66, 0.42), 0 0 0 2px rgba(255, 240, 168, 0.52);
+  }
+  50% {
+    box-shadow: 0 10px 36px rgba(245, 197, 66, 0.78), 0 0 0 5px rgba(245, 197, 66, 0.22);
+  }
+}
+
+@keyframes portalOpen {
+  0% {
+    filter: brightness(1.9) blur(6px);
+    box-shadow: 0 0 60px rgba(245, 197, 66, 0.95), 0 0 110px rgba(56, 232, 255, 0.7);
+  }
+  100% {
+    filter: brightness(1) blur(0px);
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.78), 0 0 32px rgba(245, 197, 66, 0.48);
+  }
+}
+
+.animate-laser-sweep {
+  animation: laserSweep 1.35s ease-in-out infinite;
+}
+
+.animate-radar-sweep {
+  animation: radarSweep 2.6s linear infinite;
+}
+
+.animate-spin-slow {
+  animation: spinSlow 24s linear infinite;
+}
+
+.animate-float-bob {
+  animation: floatBob 4.8s ease-in-out infinite;
+}
+
+.animate-pulse-gold {
+  animation: pulseGold 2.6s ease-in-out infinite;
+}
+
+.animate-portal-open {
+  animation: portalOpen 0.75s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-laser-sweep,
+  .animate-radar-sweep,
+  .animate-spin-slow,
+  .animate-float-bob,
+  .animate-pulse-gold {
+    animation: none !important;
+  }
+}
+
+/* Custom sleek golden scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(245, 197, 66, 0.35);
+  border-radius: 99px;
+}
